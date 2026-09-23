@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Консультант Электрокомплект</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans+Condensed:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="desk">
+      <header class="mast">
+        <a class="mark" href="/" aria-label="На главную">ЭК</a>
+        <div class="mast-copy">
+          <p class="kicker">Электрокомплект · ekt.kz</p>
+          <h1>Консультант по каталогу</h1>
+        </div>
+        <a class="bin" href="/cart">
+          Корзина
+          <span id="cart-count">0</span>
+        </a>
+      </header>
+
+      <main id="log" class="log" aria-live="polite">
+        <div class="welcome" id="welcome">
+          <p class="welcome-lead">Спросите по артикулу или названию.</p>
+          <p class="welcome-sub">
+            Наличие и цена — из снимка каталога. Чтобы положить позицию в корзину, подтвердите количество на накладной.
+          </p>
+        </div>
+      </main>
+
+      <p id="status" class="status" hidden></p>
+
+      <form id="composer" class="composer">
+        <input
+          id="file"
+          type="file"
+          hidden
+          multiple
+          accept="image/jpeg,image/png,image/webp,image/gif,.pdf,.doc,.docx,.xls,.xlsx,.csv"
+        />
+        <button type="button" class="icon-btn" id="attach" aria-label="Прикрепить фото или документ">
+          <span aria-hidden="true">+</span>
+        </button>
+        <label class="sr-only" for="message">Сообщение</label>
+        <textarea
+          id="message"
+          name="message"
+          rows="1"
+          placeholder="Артикул, название или вопрос по наличию"
+        ></textarea>
+        <button type="submit" class="send" id="send">Отправить</button>
+        <ul id="chips" class="file-list" hidden></ul>
+      </form>
+    </div>
+    <script src="/static/chat.js"></script>
+  </body>
+</html>

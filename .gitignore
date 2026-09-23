@@ -26,5 +26,8 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Local catalog dump
+data/
+
 
 docs/
