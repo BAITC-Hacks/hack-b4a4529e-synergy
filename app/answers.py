@@ -2,8 +2,49 @@
 import re
 
 
+def clarification_answer(message, products, model_text=""):
+    # Preserve plain clarification questions, never generated prices, URLs or compatibility claims.
+    for sentence in re.findall(r"(?:^|[.!?]\s*|\n)([^.!?\n]+\?)", model_text):
+        sentence = sentence.strip()
+        if (re.match(r"^(?:Уточните|Сколько|Какой|Какая|Какие|Какое|Нужен|Нужна|Нужны|Что важнее)\b", sentence)
+                and not re.search(r"\d|https?://|цен|остат|совместим|подход|безопас", sentence, re.I)):
+            return sentence
+    from .alternatives import family, specs
+    wanted = specs({"name": message})
+    kind = family({"name": message}) or (family(products[0]) if products else None)
+    questions = {
+        "breaker": [("ток", "Какой номинальный ток требуется?"), ("полюса", "Сколько полюсов требуется?"),
+                    ("характеристика", "Какая характеристика срабатывания требуется?")],
+        "cable": [("число жил", "Сколько жил требуется?"), ("сечение", "Какое сечение жил требуется?"),
+                  ("напряжение", "На какое напряжение нужен кабель?")],
+        "lamp": [("цоколь", "Какой цоколь требуется?"), ("мощность", "Какая мощность нужна?")],
+    }
+    for key, question in questions.get(kind, []):
+        if key not in wanted:
+            return question
+    return "Что важнее при выборе: цена, наличие в вашем городе или конкретная марка?"
+
+from .cart import purchase_rule_issue
+
+
 def catalog_answer(message, products):
-    lines = ["Данные каталога показаны в карточках ниже."]
+    exact = [p for p in products if p.get("exact_match") and not p.get("analog_of")]
+    lines = ["Нашёл точное совпадение. Укажите количество и добавьте товар в выбор." if len(exact) == 1
+             else "Нашёл несколько вариантов. Выберите подходящие товары." if len(products) > 1
+             else "Нашёл товар. Проверьте характеристики и укажите количество."]
+    if products and all(purchase_rule_issue(p) for p in products):
+        lines = ["Нашёл товары по запросу. До добавления нужно подтвердить единицы продажи, минимальные партии и кратность у поставщика."]
+        if len(products) == 1:
+            lines = ["Нашёл точное совпадение." if exact else "Нашёл товар.", purchase_rule_issue(products[0])]
+    if re.search(r"поставщик|поступлен", message, re.I):
+        for product in products[:3]:
+            supplier = product.get("supplier_availability")
+            if supplier:
+                quantity = supplier.get("quantity")
+                lead_time = supplier.get("lead_time_raw")
+                lines.append(f"{product['article']}: у поставщика — {quantity if quantity is not None else 'остаток неизвестен'}; "
+                             + (f"срок поступления по данным поставщика: {lead_time}." if lead_time else "срок поступления не указан."))
+                lines.append(supplier["note"])
     for product in products[:3]:
         if product.get("analog_reason"):
             lines.append(f"{product['name']}: {product['analog_reason']}")
@@ -39,7 +80,8 @@ def terms_answer(terms):
     if rules:
         for key, label in (("min_quantity", "Минимальная партия"), ("quantity_step", "Кратность")):
             if rules.get(key) is not None:
-                lines.append(f"{label}: {rules[key]} {rules.get('unit') or 'ед.'}.")
+                unit = rules.get("unit") if rules.get("unit_known") else "(единица продажи не подтверждена)"
+                lines.append(f"{label}: {rules[key]} {unit}.")
         if rules.get("purchase_rule_note"):
             lines.append(rules["purchase_rule_note"])
     lines.extend(terms.get("clarifications", []))

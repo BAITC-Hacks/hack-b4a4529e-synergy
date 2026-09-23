@@ -13,6 +13,7 @@ import numpy as np
 
 from .catalog import embed_text, load_products
 from .config import EMBED_MODEL, INDEX_DIR
+from .embedding_text import EMBEDDING_TEMPLATE_VERSION, input_tokens, token_batches
 from .provider import client as provider_client
 
 
@@ -22,17 +23,18 @@ def digest(data: bytes) -> str:
 
 def embed_texts(client, texts: list[str], cache_path: Path, model: str = EMBED_MODEL) -> np.ndarray:
     vectors = []
+    inputs = [input_tokens(text, model, truncate=True) for text in texts]
     with sqlite3.connect(cache_path) as cache:
         cache.execute("CREATE TABLE IF NOT EXISTS vectors (key TEXT PRIMARY KEY, vector BLOB NOT NULL)")
-        for start in range(0, len(texts), 64):
-            batch = texts[start:start + 64]
-            keys = [digest((model + "\n" + text).encode()) for text in batch]
+        for batch in token_batches(inputs):
+            # Cache the exact token sequence sent to the provider, including model.
+            keys = [digest((model + "\n" + json.dumps(tokens)).encode()) for tokens in batch]
             saved = {key: np.frombuffer(row[0], dtype=np.float32).copy()
                      for key in keys if (row := cache.execute("SELECT vector FROM vectors WHERE key=?", (key,)).fetchone())}
             missing = list(dict.fromkeys(key for key in keys if key not in saved))
             if missing:
-                text_by_key = dict(zip(keys, batch))
-                response = client.embeddings.create(model=model, input=[text_by_key[key] for key in missing])
+                tokens_by_key = dict(zip(keys, batch))
+                response = client.embeddings.create(model=model, input=[tokens_by_key[key] for key in missing])
                 items = sorted(response.data, key=lambda item: item.index)
                 if [item.index for item in items] != list(range(len(missing))):
                     raise ValueError("Embedding response does not match requested products")
@@ -45,7 +47,7 @@ def embed_texts(client, texts: list[str], cache_path: Path, model: str = EMBED_M
                     cache.execute("INSERT OR REPLACE INTO vectors VALUES (?,?)", (key, vector.tobytes()))
                 cache.commit()
             vectors.extend(saved[key] for key in keys)
-            print(f"Embedded {min(start + 64, len(texts))}/{len(texts)} (new {len(missing)})", flush=True)
+            print(f"Embedded {len(vectors)}/{len(texts)} (new {len(missing)})", flush=True)
     array = np.asarray(vectors, dtype=np.float32)
     if array.ndim != 2 or not np.isfinite(array).all():
         raise ValueError("Invalid or inconsistent embedding dimensions")
@@ -61,8 +63,8 @@ def build_index(data_dir: Path | None = None, index_dir: Path | None = None, *, 
         raise ValueError("No products found. Download a catalog snapshot first.")
     target = index_dir or INDEX_DIR
     target.mkdir(parents=True, exist_ok=True)
-    client = client or provider_client(timeout=30, max_retries=2)
-    vectors = embed_texts(client, [embed_text(p)[:12000] for p in products], target / "embedding-cache.sqlite3")
+    client = client or provider_client(timeout=30, max_retries=6)
+    vectors = embed_texts(client, [embed_text(p) for p in products], target / "embedding-cache.sqlite3")
     version = uuid.uuid4().hex
     folder = target / version
     folder.mkdir()
@@ -73,6 +75,7 @@ def build_index(data_dir: Path | None = None, index_dir: Path | None = None, *, 
                       if p.get("quantity") is not None and p.get("source_observed_at"))
     metadata = {
         "version": version, "model": EMBED_MODEL, "dimensions": vectors.shape[1],
+        "embedding_template_version": EMBEDDING_TEMPLATE_VERSION,
         "count": len(products), "indexed_at": datetime.now(timezone.utc).isoformat(),
         "source": "downloaded catalog snapshot", "stock_observed_at": None,
         "source_precedence": ["raw API archive"] if products[0].get("source_response") else ["pages", "products.json", "csv", "details"],

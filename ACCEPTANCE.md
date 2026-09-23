@@ -1,5 +1,35 @@
 # EKT prototype acceptance — 2026-09-23
 
+## Purchase-unit and quantity-rule verification — 2026-09-23
+
+- **157 automated tests passed**, including 17 purchase-rule regression cases; JavaScript syntax and diff checks passed. Test purchase fixtures now explicitly supply confirmed units, minimums and increments.
+- The active catalog remains version `39bc1ec755e043d8bcbabe85b98deecb`, with all 15,037 products. Of these, 853 have recognized selling units, and none have unambiguous minimum/increment fields. All currently require supplier clarification before adding; search, technical details, prices and stock remain available.
+- Browser checks on real products passed: `151100015_` displays an unconfirmed selling unit beside price and stock; `050300044_` retains metres and explains its unconfirmed minimum and cut increment. Neither shows a quantity selector or selection button.
+- After restarting the local app, direct HTTP purchase attempts for both products returned 409 and left the cart empty. Readiness returned 200 with the unchanged catalog version. The generated result is `data/acceptance/purchase-rules.json`.
+- Confirmation and quantity edits recheck current rules. Fixture coverage proves that a documented 0.25-metre increment permits valid fractional amounts and rejects incompatible amounts. Earlier live cart-addition results below predate this stricter eligibility check.
+
+## UX follow-up — 2026-09-23
+
+- **136 automated tests passed** (12.24 s), including 11 new UX/API regression tests. JavaScript syntax checks and `git diff --check` passed.
+- **Desktop browser, isolated synthetic catalog:** selected two products across separate searches, refreshed without losing the selection or either answer's cards, edited a quantity, generated a fresh two-line proposal, and confirmed it. The cart increased only after confirmation.
+- **Cart browser checks:** increasing a line from 2 to 3 displayed “ещё 1” and the additional cost while retaining quantity 2 until confirmation. Decreasing from 3 to 1 saved directly. Starting a new chat cleared the conversation and selection while retaining the two confirmed cart lines.
+- **Attachment review:** a two-line synthetic CSV was processed by the configured live model. A checked row and edited quantity 4 survived an alternatives response and a page refresh. These fixtures remained separate from the real catalog.
+- **Mobile, 390×844:** new-chat and stop controls were visually inspected; no horizontal overflow was observed. During a real provider request, typing remained available. Stopping restored the submitted message alongside the next draft and discarded the late response.
+- **Real catalog smoke check:** readiness succeeded with 15,037 products at version `27283884a7b14cb58a4860033de83726`. Exact lookup of `151100015_` displayed the new card actions. The in-stock alternatives action was exercised against both the isolated fixture catalog and real data.
+- Model history remains bounded to 20 text messages; visible messages retain their product/source snapshots for the lifetime of the anonymous session. “New chat” starts over without archiving old chats. Sessions still expire or clear on restart. Stopping cannot recall a provider call already sent, but cancelled work cannot publish results or mutate proposals/cart state.
+
+The earlier prototype acceptance below remains a historical record of its original catalog snapshot and latency samples; this UX follow-up does not claim a new latency percentile.
+
+## Embedding and retrieval follow-up — 2026-09-23
+
+- Rebuilt all 15,037 real products with `text-embedding-3-small`, 1,536 dimensions and embedding template 1. Active version: `27283884a7b14cb58a4860033de83726`. Verified that every active product's current token input has a matching cache entry. Readiness returned HTTP 200 with this version and product count.
+- Text uses an independent allowlist of readable identity and technical fields; operational fields, media IDs and promotional paths are excluded. Token budgets replace character slicing; descriptions follow technical fields. The rebuild used 5,609,754 input tokens, at most 2,049 per product, so no product was truncated. An initial provider rate limit interrupted indexing; resumption reused all 5,056 completed cached vectors. The builder now allows six SDK retries.
+- **Passed: 140 automated tests**, plus dependency and diff checks. Coverage includes stock-only cache reuse, token and batch limits, provider response ordering, outdated template rejection, unknown articles, abbreviated luminaires and known model-code lookup.
+- **Passed: 21/21 direct live retrieval cases** at cutoff 0.55: 14 positive cases hit a labeled target in the top five, and seven no-match cases returned no products. MRR@5 over the positive cases was 0.929. Results, model, snapshot and label checksum are in ignored `data/acceptance/retrieval.json`; reproduce with `python -m scripts.retrieval_eval`.
+- The lower 0.30 cutoff returned unrelated results for food queries. Automotive tire paraphrases also matched electrical busbars at 0.45. The final regression set includes those paraphrases and broad valid catalog requests. A category filter incorrectly rejected the highest-ranked NPP luminaire; it now recognizes the structured luminaire type.
+- Full chat checks at 0.55 initially passed **19/20**; the remaining perforator request intermittently returned no products. A bare model code such as `HB-20-24` was treated as an unknown article. Known model codes now resolve from actual product names without weakening explicit article lookup. Both targeted live model regressions subsequently passed **2/2**, with deterministic unit coverage of the tool-query path. The complete chat sample was not rerun after this final correction. Reports: `data/acceptance/embedding-chat-regression-final.json` and `embedding-model-regressions.json`.
+- These manually reviewed cases are a small regression set. Validation failures used for fixes are no longer an untouched evaluation set. Positive target IDs are not exhaustive relevance labels; these results do not establish catalog-wide precision/recall or general chat reliability. The earlier acceptance records below describe the previous index.
+
 ## Environment and provenance
 
 - Python 3.12 on Ubuntu/WSL, one FastAPI worker, Russian anonymous sessions, local cart.

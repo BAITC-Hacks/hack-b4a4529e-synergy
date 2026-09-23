@@ -1,0 +1,26 @@
+{
+  "description": "Manually labeled Russian queries against the EKT catalog observed 2026-09-23. Positive IDs are known relevant targets, not exhaustive relevance judgments. Calibration and validation cases are reported separately; these are a small regression set, not a production quality estimate.",
+  "cases": [
+    {"id": "breaker-model", "split": "calibration", "query": "Автомат IEK ВА47-29 на 20 ампер однофазный", "expected_ids": [18427], "target": "ВА47-29 (1ф) 20А IEK"},
+    {"id": "socket-astra", "split": "calibration", "query": "Белая накладная розетка ASTRA UNIT на 10А", "expected_ids": [17993], "target": "Розетка о/у 10А белая ASTRA UNIT"},
+    {"id": "lamp-gx53", "split": "calibration", "query": "Светодиодная лампа таблетка IEK GX53 10Вт 4000К", "expected_ids": [44177], "target": "Лампа LED T75 10Вт 230В 4000К GX53 IEK"},
+    {"id": "wire-pv3", "split": "calibration", "query": "Белый провод ПВ3 сечением 2,5 EKT ГОСТ", "expected_ids": [18031], "target": "ПВ3- 2,5 белый ГОСТ EKT"},
+    {"id": "tape-black", "split": "calibration", "query": "Черная японская изолента Vini Tape 102 из ПВХ", "expected_ids": [18153], "target": "Японская Изолента #102 ПВХ черная Vini Tape"},
+    {"id": "food", "split": "calibration", "query": "Купить свежие бананы", "expected_ids": []},
+    {"id": "pet-food", "split": "calibration", "query": "Сухой корм для кошки", "expected_ids": []},
+    {"id": "breaker-32", "split": "validation", "query": "Автоматический выключатель IEK ВА47-29 32 А однофазный", "expected_ids": [18428], "target": "ВА47-29 (1ф) 32А IEK"},
+    {"id": "lamp-daylight", "split": "validation", "query": "Лампа IEK GX53 таблетка 6Вт холодный свет 6500К", "expected_ids": [44176], "target": "Лампа LED T75 6Вт 230В 6500К GX53 IEK"},
+    {"id": "perforator", "split": "validation", "query": "Перфоратор КВТ модели HB-20-24", "expected_ids": [529129], "target": "Перфоратор HB-20-24 КВТ"},
+    {"id": "tape-blue", "split": "validation", "query": "Синяя ПВХ изолента Vini Tape японская номер 102", "expected_ids": [20187], "target": "Японская Изолента #102 ПВХ синяя Vini Tape"},
+    {"id": "luminaire-npp", "split": "validation", "query": "Белый круглый светильник НПП 1101-100 IEK", "expected_ids": [17987], "target": "НПП 1101-100 бел/круг IEK"},
+    {"id": "baby-stroller", "split": "validation", "query": "Детская прогулочная коляска", "expected_ids": []},
+    {"id": "car-tires", "split": "validation", "query": "Зимние шины для легкового автомобиля", "expected_ids": []},
+    {"id": "unknown-article", "split": "validation", "query": "артикул zzz-000-test", "expected_ids": []},
+    {"id": "car-tires-lowercase", "split": "calibration", "query": "зимние шины для легкового автомобиля", "expected_ids": []},
+    {"id": "car-tires-short", "split": "calibration", "query": "автомобильные шины", "expected_ids": []},
+    {"id": "breaker-broad", "split": "validation", "query": "Нужен автомат 16 А", "expected_ids": [33120, 33702], "target": "Авт. Выкл. iC60N (1ф) 16A B Schneider Electric; 12116 АВ (1ф) 16А Schneider Electric"},
+    {"id": "cable-broad", "split": "validation", "query": "Кабель ВВГ 3х2.5", "expected_ids": [20505, 23466], "target": "ВВГ 3 х 2,5 0,66 кВ ГОСТ EKT; ВВГ п нг (А) 3 х 2,5 0,66 кВ ГОСТ EKT"},
+    {"id": "luminaire-broad", "split": "validation", "query": "Светильник IP65", "expected_ids": [509025, 509023], "target": "Светильник уличный 5104 потолочный GX53 IP65 серый/белый IEK"},
+    {"id": "perforator-model-code", "split": "validation", "query": "HB-20-24", "expected_ids": [529129], "target": "Перфоратор HB-20-24 КВТ"}
+  ]
+}

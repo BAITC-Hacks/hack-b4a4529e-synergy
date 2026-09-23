@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse, urljoin
 
 from .config import DATA_DIR, DETAILS_DIR, PAGES_DIR
+from .embedding_text import embed_text
 
 SKIP_PROP_KEYS = {
     "BRAND_PRIORITY",
@@ -265,20 +266,6 @@ def spec_snippet(record: dict, limit: int = 280) -> str:
         return ""
     text = "; ".join(f"{k}: {v}" for k, v in list(props.items())[:6])
     return text[:limit]
-
-
-def embed_text(product: dict) -> str:
-    parts = [
-        product.get("name") or "",
-        f"артикул {product['article']}" if product.get("article") else "",
-        product.get("category") or "",
-        product.get("description") or "",
-    ]
-    for label, value in public_properties(product.get("properties")).items():
-        if label in {"KOLICHESTVOVREZERVE", "Кратность / мин. партия"}:
-            continue
-        parts.append(f"{label}: {value}")
-    return "\n".join(p for p in parts if p)
 
 
 def _empty_product() -> dict:

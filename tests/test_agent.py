@@ -67,7 +67,35 @@ def test_search_answer_uses_visible_catalog_cards(monkeypatch):
     monkeypatch.setattr(agent, "_client", fail_if_called)
     result = run_turn(Session(id="test"), "200300285_")
     assert result["products"][0]["article"] == "200300285_"
-    assert "карточках" in result["text"]
+    assert "точное совпадение" in result["text"]
+
+
+def test_bare_catalog_model_code_bypasses_chat_and_missing_article_guard(monkeypatch):
+    import app.agent as agent
+    product = {**sample_products()[0], "name": "Перфоратор HB-20-24 КВТ"}
+    set_index(tiny_index([product]))
+    def unexpected():
+        raise AssertionError("Known model lookup must not call the chat model")
+    monkeypatch.setattr(agent, "_client", unexpected)
+    result = run_turn(Session(id="known-model"), "HB-20-24")
+    assert [p["id"] for p in result["products"]] == [product["id"]]
+    assert result["products"][0]["model_match"]
+    missing = run_turn(Session(id="missing-article"), "артикул HB-20-24")
+    assert missing["products"] == []
+
+
+def test_chat_can_search_by_model_code_extracted_from_description(monkeypatch):
+    import app.agent as agent
+    product = {**sample_products()[0], "name": "Перфоратор HB-20-24 КВТ"}
+    set_index(tiny_index([product]))
+    responses = iter([
+        Obj(output=[Obj(type="function_call", name="search_products",
+                        arguments=json.dumps({"query": "HB-20-24", "limit": 5}), call_id="1")]),
+        Obj(output=[], output_text="Найден перфоратор."),
+    ])
+    monkeypatch.setattr(agent, "_client", lambda: Obj(responses=Obj(create=lambda **kwargs: next(responses))))
+    result = run_turn(Session(id="model-query"), "Перфоратор КВТ модели HB-20-24")
+    assert [p["id"] for p in result["products"]] == [product["id"]]
 
 
 def test_multiple_detail_calls_keep_both_cards(monkeypatch):
@@ -109,6 +137,8 @@ def test_broader_tool_queries_cannot_relax_customer_cable_requirements(monkeypat
         {"id": 3, "name": "Гильза кабельная ГМ 25-8", "article": "sleeve", "price": 501,
          "quantity": 10, "category": "kabel_provod/aksessuary"},
         {"id": 4, "name": "Кабель ВВГ", "article": "unknown", "price": 100, "quantity": 10},
+        {"id": 5, "name": "Гильза кабельная ГМ 120-17", "article": "promo-sleeve",
+         "price": 2515, "quantity": 10, "category": "novinki"},
     ]
     set_index(tiny_index(products))
     responses = iter([

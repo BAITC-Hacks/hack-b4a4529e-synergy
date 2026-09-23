@@ -11,6 +11,27 @@
   --content: 880px;
 }
 
+#new-chat { margin-left: auto; white-space: nowrap; font-size: 13px; }
+#new-chat + .bin { margin-left: 0; }
+.stop-response { grid-area: send; min-height: 44px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: 12px; }
+.composer:has(#stop-response:not([hidden])) { grid-template-columns: 44px minmax(0, 1fr) 100px; }
+.selection-panel { border-top: 1px solid var(--line); padding: 20px 0; }
+.selection-panel h2 { margin: 0 0 8px; font-size: 18px; }
+.selection-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.selection-row label { flex: 1 1 260px; font-size: 14px; overflow-wrap: anywhere; }
+.selection-row input { margin-left: 10px; }
+.selection-panel > .primary { margin-top: 16px; }
+.alternatives-button { display: block; min-height: 44px; color: var(--accent); font-size: 13px; text-decoration: none; }
+.sheet td .text-button { display: block; min-height: 44px; }
+#cart-proposal { margin-top: 24px; }
+#cart-proposal .actions { margin-top: 16px; }
+@media (max-width: 600px) {
+  .mast:has(#new-chat) { gap: 6px; padding-inline: 16px; }
+  #new-chat { padding-inline: 8px; font-size: 12px; }
+  #new-chat + .bin { padding-inline: 8px; font-size: 12px; }
+  .selection-row .ghost { padding-inline: 8px; }
+}
+
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { margin: 0; min-height: 100%; }
@@ -63,7 +84,7 @@ button, .bin, .cart-return { transition: background-color 160ms ease, border-col
 .results-heading .snapshot-note[open] { flex-basis: 100%; margin-left: 0; }
 .results-note { margin: 8px 0 14px; color: var(--muted); font-size: 13px; }
 .hits { border-top: 1px solid var(--line); }
-.hit { display: flex; align-items: center; gap: 20px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.hit { display: flex; align-items: flex-start; gap: 20px; padding: 16px 0; border-bottom: 1px solid var(--line); }
 .hit-thumb { display: grid; flex: none; place-items: center; width: 64px; height: 64px; color: var(--muted); }
 .hit-thumb img { width: 100%; height: 100%; object-fit: contain; mix-blend-mode: multiply; }
 .hit-main { min-width: 0; flex: 1; }

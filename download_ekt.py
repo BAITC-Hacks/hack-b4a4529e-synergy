@@ -243,6 +243,8 @@ def export_and_report(root, folder, manifest):
         product = normalize_product(raw)
         if product is None:
             raise ValueError(f"Cannot normalize archived product {raw.get('id')}")
+        if product["source_fields"] != raw or product["properties"] != (raw.get("properties") or {}):
+            raise ValueError(f"Source fields were changed during ingestion for product {raw['id']}")
         product.update(source_response=source, source_observed_at=source["observed_at"])
         normalized.append(product)
         originals.append(raw)
@@ -280,6 +282,7 @@ def export_and_report(root, folder, manifest):
               "listing_pages": manifest["last_page"], "discovered_products": len(normalized),
               "valid_details": len(normalized), "missing_details": [], "failed_details": [],
               "raw_checksums_verified": True, "raw_top_level_field_counts": field_counts,
+              "ingested_source_fields_verified": True, "pipeline_lost_fields": 0,
               "raw_top_level_value_types": field_types, "raw_property_counts": property_counts,
               "source_field_presence": source_presence,
               "derived_field_coverage": coverage,

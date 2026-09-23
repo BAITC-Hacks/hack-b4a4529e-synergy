@@ -1,8 +1,11 @@
-from .cart import number, json_number
-from .search import article_query, exact_matches, search_products, product_hit
+import hashlib
+import re
+from .cart import number, json_number, purchase_options
+from .search import article_query, exact_matches, search_products, product_hit, constrain_results
+from .units import unit_key
 
 
-def review_items(session, items, index, filenames):
+def review_items(session, items, index, filenames, *, local_only=False):
     """Resolve extracted rows; the model never supplies authoritative product facts."""
     if not isinstance(items, list) or not 1 <= len(items) <= 100:
         raise ValueError("Передайте от 1 до 100 строк спецификации за один вызов.")
@@ -23,24 +26,48 @@ def review_items(session, items, index, filenames):
             if quantity <= 0:
                 raise ValueError("Количество должно быть положительным.")
             quantity = json_number(quantity)
+        document_id = str(item.get("document_id") or filename)
+        row_id = hashlib.sha256((document_id + "\0" + reference).encode()).hexdigest()[:24]
+        old = next((row for row in session.attachment_review if row.get("row_id") == row_id), None)
+        if old and old.get("completion") == "added":
+            reviewed.append(old)
+            continue
         exact = exact_matches(index, query)
         is_article = item.get("query_type") == "article" or article_query(query)
-        candidates = ([product_hit(p) for p in exact[:5]] if exact else [] if is_article or not query
-                      else search_products(query, 5, index=index)["results"])
+        if exact:
+            candidates = [product_hit(p) for p in exact[:5]]
+        elif is_article or not query:
+            candidates = []
+        elif local_only:
+            tokens = set(re.findall(r"[\w]+", query.casefold()))
+            ranked = sorted(((len(tokens & set(re.findall(r"[\w]+", p["name"].casefold()))), p["id"], p)
+                             for p in index.products), key=lambda value: (-value[0], value[1]))
+            candidates = constrain_results(query, [product_hit(p) for score, _, p in ranked[:20]
+                                                   if score >= max(1, len(tokens) * .6)], index=index)[:5]
+        else:
+            candidates = search_products(query, 5, index=index)["results"]
         candidates = [p for p in candidates if not p.get("analog_of")]
         status = "unresolved" if not candidates else "ambiguous"
         if len(exact) == 1:
             status = "resolved" if quantity is not None else "quantity_required"
-        reviewed.append({"filename": filename, "source_reference": reference, "query": query,
+        source_unit = str(item.get("source_unit") or "").strip()[:40]
+        for candidate in candidates:
+            candidate["purchase_options"] = purchase_options(session, index.get(candidate["id"]))
+        ready = len(exact) == 1 and quantity is not None and candidates[0]["purchase_options"]["can_add"]
+        if ready and source_unit:
+            ready = unit_key(source_unit) == unit_key(candidates[0]["unit"])
+        reviewed.append({"row_id": row_id, "document_id": document_id,
+                         "completion": "ready" if ready else "unresolved", "source_unit": source_unit,
+                         "source_text": str(item.get("source_text") or query)[:2000],
+                         "filename": filename, "source_reference": reference, "query": query,
                          "quantity": quantity, "candidate_product_ids": [p["id"] for p in candidates],
                          "candidates": candidates, "status": status})
     combined = list(session.attachment_review)
     for row in reviewed:
-        key = (row["filename"], row["source_reference"], row["query"])
-        combined = [old for old in combined if (old["filename"], old["source_reference"], old["query"]) != key]
+        combined = [old for old in combined if old.get("row_id") != row["row_id"]]
         combined.append(row)
-    if len(combined) > 500:
-        raise ValueError("В одной сессии можно разобрать до 500 строк; разделите спецификацию.")
+    if len(combined) > 20000:
+        raise ValueError("В одном подборе поддерживается до 20 000 строк. Сохраните список и начните новый подбор.")
     session.attachment_review = combined
     session.last_search = [p for row in reviewed for p in row["candidates"]][:10]
     return {"items": reviewed, "total_reviewed": len(combined),

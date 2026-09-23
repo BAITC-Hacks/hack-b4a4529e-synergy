@@ -11,12 +11,15 @@ import numpy as np
 
 from .catalog import public_properties, safe_url
 from .alternatives import compare, family, normalized, specs
-from .cart import format_kzt
+from .cart import format_kzt, purchase_rule_issue
 from .config import EMBED_MODEL, INDEX_DIR
+from .embedding_text import EMBEDDING_TEMPLATE_VERSION, input_tokens
 from .provider import client as provider_client
 
 TOKEN_RE = re.compile(r"[0-9a-zа-яё._-]{2,}", re.IGNORECASE)
-MIN_SCORE = 0.30
+MODEL_CODE_RE = re.compile(r"(?=.*[a-zа-яё])(?=.*\d)[a-zа-яё0-9]+(?:[-_][a-zа-яё0-9]+){2,}", re.I)
+# Calibrated on scripts/retrieval_cases.json; recheck after model/text changes.
+MIN_SCORE = 0.55
 
 
 class CatalogUnavailable(RuntimeError):
@@ -46,7 +49,11 @@ class CatalogIndex:
         self.metadata = metadata or {"version": "test", "model": EMBED_MODEL, "count": len(products)}
         self.by_id = {p["id"]: p for p in products}
         self.by_article: dict[str, list[dict]] = {}
+        self.by_model_code: dict[str, list[dict]] = {}
         for product in products:
+            for token in _tokens(product.get("name") or ""):
+                if MODEL_CODE_RE.fullmatch(token):
+                    self.by_model_code.setdefault(token, []).append(product)
             for article in {product.get("article") or "", str((product.get("properties") or {}).get("ARTIKULPOSTAVSHCHIKA") or "")}:
                 key = _article_key(article)
                 if key:
@@ -67,6 +74,8 @@ class CatalogIndex:
         metadata = json.loads((root / "metadata.json").read_text())
         if metadata["model"] != EMBED_MODEL:
             raise ValueError("Embedding model changed; rebuild the index")
+        if metadata.get("embedding_template_version") != EMBEDDING_TEMPLATE_VERSION:
+            raise ValueError("Embedding text template changed; rebuild the index")
         for filename, key in (("products.json", "products_sha256"), ("embeddings.npy", "vectors_sha256")):
             if hashlib.sha256((root / filename).read_bytes()).hexdigest() != metadata[key]:
                 raise ValueError("Index checksum mismatch")
@@ -110,6 +119,7 @@ def set_index(index: CatalogIndex | None) -> None:
 
 def product_hit(product: dict, score: float | None = None) -> dict:
     quantity = product.get("quantity")
+    rule_issue = purchase_rule_issue(product)
     hit = {key: product.get(key) for key in ("id", "name", "article", "price", "quantity", "category", "spec_snippet")}
     hit.update({
         "availability": "unknown" if quantity is None else "in_stock" if quantity > 0 else "out_of_stock",
@@ -121,7 +131,9 @@ def product_hit(product: dict, score: float | None = None) -> dict:
         "properties": public_properties(product.get("properties")),
         "stores": product.get("stores") or [],
         "min_quantity": product.get("min_quantity"), "quantity_step": product.get("quantity_step"),
-        "purchase_rule_note": product.get("purchase_rule_note") or "",
+        "purchase_rule_note": rule_issue or product.get("purchase_rule_note") or "",
+        "purchase_rules_confirmed": not bool(rule_issue),
+        "unit_label": product["unit"] if product.get("unit_known") and product.get("unit") else "единица продажи не подтверждена",
         "source_observed_at": product.get("source_observed_at"),
         "unit_known": product.get("unit_known", False),
         "unit_source": product.get("unit_source"),
@@ -163,8 +175,9 @@ def exact_matches(index: CatalogIndex, query: str) -> list[dict]:
 
 @lru_cache(maxsize=256)
 def _embed_query(text: str, model: str) -> np.ndarray:
+    tokens = input_tokens(text, model)
     client = provider_client(timeout=10, max_retries=1)
-    response = client.embeddings.create(model=model, input=[text])
+    response = client.embeddings.create(model=model, input=[tokens])
     vector = np.asarray(response.data[0].embedding, dtype=np.float32)
     if not np.isfinite(vector).all() or np.linalg.norm(vector) == 0:
         raise ValueError("Invalid query embedding")
@@ -179,6 +192,10 @@ def constrain_results(query: str, products: list[dict], *, index) -> list[dict]:
     """Exploratory tool queries must not loosen the customer's stated requirements."""
     if exact_matches(index, query):
         return products
+    clauses = re.split(r"[;\n]|\s+(?:и|или)\s+", query, flags=re.I)
+    if sum(bool(family({"name": clause})) for clause in clauses) > 1:
+        # A comparison or multi-product request has separate specifications per item.
+        return products
     requested = {"name": query}
     wanted, wanted_family = technical_specs(requested), family(requested)
     if not wanted and not wanted_family:
@@ -187,13 +204,13 @@ def constrain_results(query: str, products: list[dict], *, index) -> list[dict]:
     for product in products:
         source = index.get(product["id"]) or product
         actual, actual_family = technical_specs(source), family(source)
-        if wanted_family and actual_family and wanted_family != actual_family:
+        if wanted_family and wanted_family != actual_family:
+            continue
+        if "марка кабеля" in wanted and actual.get("марка кабеля") != wanted["марка кабеля"]:
             continue
         if any(key in actual and actual[key] != value for key, value in wanted.items()):
             continue
         missing = sorted(wanted.keys() - actual.keys())
-        if wanted_family and not actual_family:
-            missing.append("тип товара")
         hit = {**product}
         hit.pop("unverified_specs", None)
         if missing:
@@ -225,15 +242,20 @@ def article_query(query: str) -> bool:
                 or re.fullmatch(r"\d{6,}_?|(?=.*\d)[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+){2,}_?", query.strip()))
 
 
-def search_products(query: str, limit: int = 5, *, index=None, embed_query=None) -> dict:
+def search_products(query: str, limit: int = 5, *, index=None, embed_query=None, min_score: float = MIN_SCORE) -> dict:
     catalog = index or get_index()
     limit = max(1, min(int(limit), 10))
     query = (query or "").strip()
     if not query:
         return {"results": [], "error": "пустой запрос"}
     exact = exact_matches(catalog, query)
+    # A bare code may name a model present in the catalog, rather than an SKU.
+    # Explicit "артикул ..." queries still only match real article fields.
+    model_matches = catalog.by_model_code.get(query.casefold(), [])
     if exact:
         hits = [{**product_hit(product, 1.0), "exact_match": True} for product in exact[:limit]]
+    elif model_matches:
+        hits = [{**product_hit(product, 1.0), "model_match": True} for product in model_matches[:limit]]
     elif article_query(query):
         hits = []
     else:
@@ -246,7 +268,7 @@ def search_products(query: str, limit: int = 5, *, index=None, embed_query=None)
         order = np.argsort(-scores)
         verified, uncertain = [], []
         for i in order:
-            if scores[i] < MIN_SCORE:
+            if scores[i] < min_score:
                 break
             product = catalog.products[int(i)]
             product_family = family(product)
@@ -279,7 +301,7 @@ def search_products(query: str, limit: int = 5, *, index=None, embed_query=None)
         technical_specs(catalog.get(hit["id"])) != technical_specs(catalog.get(hits[0]["id"]))
         for hit in hits[1:]
     )
-    ambiguous = len(exact) > 1 or semantic_ambiguous
+    ambiguous = len(exact) > 1 or (not exact and len(model_matches) > 1) or semantic_ambiguous
     return {"query": query, "results": hits, "ambiguous": ambiguous,
             "needs_clarification": not hits or ambiguous or bool(hits[0].get("unverified_specs")),
             "snapshot": catalog.metadata,
@@ -297,3 +319,11 @@ def get_product(product_id: int, *, index=None) -> dict:
         detail["analogs"] = _analogs_for(catalog, product, 3)
     detail["snapshot"] = catalog.metadata
     return detail
+
+
+def get_alternatives(product_id: int, *, index=None) -> dict:
+    catalog = index or get_index()
+    product = catalog.get(product_id)
+    if not product:
+        return {"error": "товар не найден"}
+    return {**product_detail(product), "analogs": _analogs_for(catalog, product, 3), "snapshot": catalog.metadata}

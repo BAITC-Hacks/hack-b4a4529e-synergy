@@ -37,7 +37,7 @@ def family(product):
     cable_name = re.search(r"(?:кабель|провод|ввг|кввг)\b", name)
     if (cable_name or category.startswith("kabel_provod")) and not re.search(r"канал|держатель|наконечник|ввод|гильз|стяжк|креп[её]ж", name):
         return "cable"
-    if "светильник" in name:
+    if "светильник" in name or (product.get("properties") or {}).get("TIP_SVETILNIKA"):
         return "luminaire"
     if "лампа" in name:
         return "lamp"

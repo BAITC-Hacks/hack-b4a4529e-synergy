@@ -18,6 +18,14 @@ Existing chat, cart, anonymous session and proposal-ID routes remain. Additions:
 
 ## Acceptance and remaining dependencies
 
+### Delivered UX follow-up — 2026-09-23
+
+The header now offers a new chat while preserving the cart. Visible conversation history retains each answer's product cards independently of the model's limited context. Product selections accumulate across searches; users can edit quantities and confirm a combined proposal. Cart decreases validate and save directly; increases require confirmation of the added quantity. Users can type the next message during a response or stop processing and recover their draft. Every product offers an explicit alternatives action with factual comparison or an honest no-match answer. Attachment review selections and quantity drafts survive rerenders and refresh within the same browser tab and chat.
+
+Added routes: `POST /api/chat/new`, `POST /api/chat/stop`, `PUT /api/selection`, `POST /api/products/{id}/alternatives`, and `POST /api/cart/quantity`. The read-only `get_alternatives` model tool supports explicit follow-ups. Model turns run against isolated session copies and publish only while their request, chat and cart revision remain current; stopped or superseded results cannot change the cart or conversation. An already-sent provider request can still finish remotely.
+
+Verification: 136 automated tests passed, including 11 focused UX tests. Desktop and mobile browser journeys covered selection, both quantity directions, confirmation, refresh, new chat, explicit alternatives, attachment draft retention, typing during a response and cancellation. Detailed evidence and source-data limitations remain in `ACCEPTANCE.md`.
+
 See `ACCEPTANCE.md` for dated results, measured latency and reproducible commands. Automated tests alone do not establish client acceptance. Real source examples currently cover certificate retrieval; verified minimum/step enforcement is tested with explicitly synthetic fixtures, because those source fields are unavailable. No production compatibility is claimed.
 
 ## Future same-origin website integration

@@ -238,5 +238,5 @@ def test_truncated_attachment_response_restores_previous_review(monkeypatch):
     response = Obj(status="incomplete", output=[], output_text="partial result")
     monkeypatch.setattr(agent, "_client", lambda: Obj(responses=Obj(create=lambda **kw: response)))
     with pytest.raises(AttachmentError, match="Разделите"):
-        agent.run_turn(session, "Разбери", [{"filename": "new.csv", "mime": "text/csv", "data": b"article,quantity"}])
+        agent.run_turn(session, "Разбери", [{"filename": "new.pdf", "mime": "application/pdf", "data": b"test-pdf"}])
     assert session.attachment_review == previous and not session.history and not session.cart

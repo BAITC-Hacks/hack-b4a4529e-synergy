@@ -2,14 +2,17 @@
 
 A Russian-language shopping assistant for the [ekt.kz](https://ekt.kz) catalog. It searches a downloaded catalog by article or description, shows product details and stock from that snapshot, and prepares a local cart. Adding items always requires explicit confirmation. This is a hackathon prototype; it does not place an order or reserve stock.
 
+The app uses a snapshot because semantic search needs a prebuilt embedding index for the catalog. It calls the EKT API when downloading or refreshing data, not for each chat request. This makes searches independent of EKT API availability during a demo, but prices and stock can become stale.
+
 ## Reviewer quick start
 
-The automated tests need **no API keys, catalog download, or network access** after dependencies are installed:
+The automated tests need **no API keys, catalog download, or network access** after dependencies and the public tokenizer vocabulary are cached:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt -c constraints.txt
+python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
 python -m pytest -q
 ```
 
@@ -50,14 +53,25 @@ For a public URL, put the app behind an HTTPS reverse proxy, forward the origina
 ## Five-minute review flow
 
 1. Ask for an article, product name, or description, such as “Автоматический выключатель 16 А”.
-2. Request a quantity for an in-stock item or use its **Выбрать** button.
-3. Decline the proposal; the cart should remain empty.
-4. Request it again, confirm with **Добавить в корзину** or “да, добавь”, then open `/cart`.
+2. Use **Выбрать** on two available products. Both stay in the selection while you search or refresh. Edit quantities if needed.
+3. Click **Проверить и добавить выбранные**, then decline the proposal; the cart should remain empty.
+4. Prepare the selection again, confirm with **Добавить в корзину** or “да, добавь”, then open `/cart`.
 5. Refresh the cart: confirmed items remain in the same browser session.
 
 Exact article matches avoid an embedding call. Natural-language searches use the local embedding index. The model can search and prepare a proposal, but only the server's confirmation handler changes the cart. A proposal expires after 10 minutes; prices and quantities are checked again on confirmation.
 
 The product card's quantity control uses server-calculated minimum, multiple, and remaining stock. Missing requested technical specifications are marked for clarification. Monetary API values are decimal strings; the displayed price and totals come from server-formatted labels.
+
+Adding a product requires a confirmed selling unit and explicit positive minimum quantity and purchase increment. Unknown units are displayed as “единица продажи не подтверждена”. A metre-based selling unit does not authorize arbitrary cut lengths. Missing terms block selection, proposals, confirmation and quantity edits on the server; products remain searchable. `KRATNOST_MIN`, `KRATNOST_MAKS`, package lengths and numbers in names are not substitutes for documented purchase rules. The current API archive does not contain unambiguous minimum/increment fields, so its products require supplier clarification before adding. Confirmed terms must come from catalog ingestion, not chat assertions or browser parameters.
+
+### Everyday chat controls
+
+- **Новый чат** clears the conversation, pending proposal, selection and attachment review while keeping confirmed cart items. It also invalidates an in-flight response. It starts a fresh conversation; it does not archive previous conversations.
+- Each answer retains its own product cards and source links. Visible history lasts for the anonymous session; only the last 20 text messages are sent as model history. Sessions still expire after inactivity and are cleared on server restart.
+- **Остановить** discards a pending response and restores the submitted draft. You can type the next message while waiting. A provider call already in progress may finish, but its late results cannot change the chat, proposal or cart.
+- **Показать аналоги** works on available and unavailable products and provides matching attributes, differences and unknowns. The same read-only capability is available to the assistant.
+- Cart quantities are editable. Decreases are validated and saved; increases show the additional quantity and cost and require confirmation.
+- Specification checkboxes, candidate choices and edited quantities survive rerenders. Review drafts also survive refresh in the same tab via session storage; original file bytes are never saved there.
 
 ## Scope and checks
 
@@ -96,11 +110,33 @@ python download_ekt.py
 python -m app.index_build
 ```
 
-Normalized products retain `source_fields` and `source_response` for provenance, complete properties and offers, and warehouse IDs. Explicit cord/roll lengths are exposed in `lengths` with original values, source fields and parsed metres. `embedded_specifications` decodes recognized embedded JSON without changing the original string. A positive `METRAZHNYY_TOVAR` flag supplies the selling unit `м` when an explicit unit is unavailable. Package information, stock, length and purchase increments remain distinct; numbers in product names and `KRATNOST_MAKS` are not guessed to be lengths.
+Normalized products retain `source_fields` and `source_response` for provenance, complete properties and offers, and warehouse IDs. Explicit cord/roll lengths are exposed in `lengths` with original values, source fields and parsed metres. `embedded_specifications` decodes recognized embedded JSON without changing the original string. A positive `METRAZHNYY_TOVAR` flag supplies the selling unit `м` when an explicit unit is unavailable. Supplier quantity and lead time are exposed separately in `supplier_availability`; they never increase catalog stock or promise delivery to the customer. Expanded product cards show the full description. Package information, stock, length and purchase increments remain distinct; numbers in product names and `KRATNOST_MAKS` are not guessed to be lengths.
 
 Index publication is atomic. Metadata records the source run, field coverage, model, checksum and build version. Certificate IDs such as `FILES_CERTIFICATES` are not links. `KRATNOST_MIN` alone remains supplier-unconfirmed; known purchase rules are enforced when proposing and confirming. The legacy targeted refresh helper refuses to modify published raw archives: use a fresh complete run instead. Synthetic fixtures stay in tests and are never mixed into the real catalog.
 
 Configure `EKT_API_USER` and `EKT_API_PASSWORD` through the environment or ignored `.env`, not source code. `docs/` is ignored because local client documents can contain credentials. Runtime timing logs record request ID, method, route template, status and elapsed seconds.
+
+## Embedding text and retrieval checks
+
+The active vectors are `data/index/<version>/embeddings.npy`, with product records and checksummed metadata alongside them. `current.json` selects the version; `embedding-cache.sqlite3` reuses vectors for identical model/token inputs. Query vectors use a bounded in-process cache. Docker keeps the catalog and index in `catalog_data`.
+
+`app/embedding_text.py` owns an explicit allowlist of readable identity and technical fields, independently of UI labels. It omits stock, supplier lead times, price-display flags, media IDs, barcodes, promotional category paths and unknown properties. Original fields remain in product metadata. Stable fields are sorted, HTML is removed, and descriptions come last. Each product uses at most 8,192 tokens; requests contain at most 64 inputs and 300,000 tokens. Overlong search queries are rejected instead of silently losing customer requirements.
+
+Increment `EMBEDDING_TEMPLATE_VERSION` when changing field selection, labels, cleanup, ordering or truncation, then rebuild before starting the updated app. An index with an absent or different template version is rejected. Index builds reuse cached vectors and only replace the active pointer after successful validation. The Docker image and CI cache the tokenizer vocabulary during setup, so first-use tokenization needs no download there.
+
+Run the labeled Russian retrieval regression independently of the chat model:
+
+```bash
+python -m scripts.retrieval_eval
+# Diagnose thresholds; calibration and validation groups are reported separately:
+python -m scripts.retrieval_eval --thresholds 0.30 0.45 0.50 0.55
+```
+
+These commands call the embedding API. Reports go to ignored `data/acceptance/retrieval.json` and record the snapshot, label hash, hit@5, MRR@5 and no-match accuracy. The default run exits nonzero on any failed case. Labels in `scripts/retrieval_cases.json` are manually selected real product IDs; missing products fail explicitly and require label review. Positive targets are not exhaustive relevance judgments, so the report does not claim precision or recall over the entire catalog. This small regression set is not a production quality guarantee. Full chat acceptance also requires these queries to retrieve the labeled products or return no products for negative cases.
+
+The current cutoff is 0.55 for `text-embedding-3-small` with template 1. Lower cutoffs returned unrelated products for out-of-catalog requests, including automotive tire queries matching electrical busbars. The regression set includes paraphrases and broad valid searches to check this precision/recall tradeoff. Recheck the cutoff when changing the model, text template or catalog. Validation cases used to diagnose a failure become regression cases after the fix; broader independent evaluation is still needed before claiming general search quality.
+
+Bare model codes already present in product names (for example `HB-20-24`) are looked up directly and marked `model_match`. They are not mislabeled as article matches; real article matches take priority, explicit article requests still only use article fields, and multiple products with the same model code require clarification. Structured luminaire types also prevent abbreviated product names from being rejected by category filtering.
 
 ## Reproduce live acceptance
 

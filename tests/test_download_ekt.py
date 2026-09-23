@@ -73,7 +73,10 @@ def test_full_responses_preserved_even_when_csv_already_has_product(tmp_path, mo
     report = json.loads((folder / "report.json").read_text())
     assert report["valid_details"] == report["discovered_products"] == 1
     assert report["missing_details"] == [] and report["raw_checksums_verified"]
+    assert report["ingested_source_fields_verified"] and report["pipeline_lost_fields"] == 0
     assert report["raw_top_level_field_counts"]["unknown"] == 1
+    assert report["source_field_presence"]["quantity"] == {"present": 1}
+    assert report["source_field_presence"]["unit"] == {"absent": 1}
     assert json.loads((folder / "products.json").read_text())[0]["source_fields"] == raw
 
 
@@ -250,6 +253,7 @@ def test_deleted_product_is_reported_and_stale_nulls_not_filled(tmp_path, monkey
     folder = run(tmp_path, monkeypatch, API({1: raw}), new=True)
     report = json.loads((folder / "report.json").read_text())
     assert report["previous_ids_not_listed"] == [2]
+    assert report["source_field_presence"]["price"] == {"null": 1}
     p = load_products(tmp_path)[0]
     assert p["price"] is None and p["quantity"] is None and p["stores"] == [] and p["properties"] == {}
 
@@ -270,6 +274,9 @@ def test_supplier_quantity_is_not_warehouse_stock_and_description_is_complete():
     assert hit["properties"]["Срок поступления от поставщика"] == "72 часа"
     assert hit["quantity"] == 0 and hit["availability"] == "out_of_stock"
     assert not purchase_options(Session("supplier"), p)["can_add"]
+    from app.answers import catalog_answer
+    answer = catalog_answer("Сколько у поставщика и когда поступление?", [hit])
+    assert "6" in answer and "72 часа" in answer and "не является сроком доставки" in answer
 
 
 def test_http_failure_body_and_status_are_preserved(tmp_path, monkeypatch):

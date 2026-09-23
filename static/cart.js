@@ -31,7 +31,18 @@ function renderCart(cart) {
     const qty = document.createElement("td");
     qty.className = "mono";
     qty.dataset.label = "Количество";
-    qty.textContent = `${Number(item.quantity).toLocaleString("ru-RU", { maximumFractionDigits: 6 })} ${item.unit || "ед."}`;
+    const quantity = document.createElement("input");
+    quantity.type = "number"; quantity.min = "0.000001"; quantity.step = "any";
+    quantity.className = "quantity-input"; quantity.value = item.quantity;
+    quantity.setAttribute("aria-label", "Количество в корзине для " + item.name);
+    const save = document.createElement("button");
+    save.type = "button"; save.className = "text-button"; save.textContent = "Сохранить";
+    save.setAttribute("aria-label", "Сохранить количество для " + item.name);
+    save.addEventListener("click", () => {
+      if (!quantity.value || !quantity.reportValidity()) return;
+      saveQuantity(item.line_id, quantity.value);
+    });
+    qty.append(quantity, document.createTextNode(" " + (item.unit || "ед.")), save);
     const price = document.createElement("td");
     price.className = "mono";
     price.dataset.label = "Цена";
@@ -54,6 +65,52 @@ function renderCart(cart) {
   grand.textContent = cart.total_label || money(cart.total);
 }
 
+function renderProposal(proposal) {
+  const section = document.getElementById("cart-proposal");
+  section.replaceChildren(); section.hidden = !proposal;
+  if (!proposal) return;
+  const heading = document.createElement("h2"); heading.textContent = "Подтвердите добавление";
+  const note = document.createElement("p"); note.textContent = "Текущее количество ещё не изменилось. Будет добавлено:";
+  section.append(heading, note);
+  for (const item of proposal.items) {
+    const line = document.createElement("p");
+    line.textContent = `${item.name} — ещё ${item.quantity} ${item.unit}, ${item.total_label}`;
+    section.append(line);
+  }
+  const total = document.createElement("strong"); total.textContent = "Стоимость добавления: " + proposal.total_label;
+  section.append(total);
+  const actions = document.createElement("div"); actions.className = "actions";
+  for (const [action, label] of [["cancel", "Отмена"], ["confirm", "Подтвердить добавление"]]) {
+    const button = document.createElement("button"); button.type = "button";
+    button.className = action === "confirm" ? "primary" : "ghost"; button.textContent = label;
+    button.addEventListener("click", () => cartRequest("/api/cart/" + action, {proposal_id: proposal.id}));
+    actions.append(button);
+  }
+  section.append(actions);
+  section.tabIndex = -1; section.focus();
+}
+
+let updating = false;
+async function cartRequest(url, body) {
+  if (updating) return;
+  updating = true;
+  document.querySelectorAll("main button").forEach(button => { button.disabled = true; });
+  try {
+    const response = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf}, body: JSON.stringify(body)});
+    const data = await response.json();
+    if (data.cart) { renderCart(data.cart); renderProposal(data.proposal); }
+    showStatus(!response.ok ? data.error || "Не удалось изменить количество." : data.proposal
+      ? "Проверьте дополнительное количество и подтвердите добавление." : data.status === "cancelled"
+      ? "Добавление отменено. Количество не изменилось." : "Корзина обновлена.");
+  } catch { showStatus("Нет связи. Проверьте корзину после восстановления соединения."); }
+  finally {
+    updating = false;
+    document.querySelectorAll("main button").forEach(button => { button.disabled = false; });
+  }
+}
+
+function saveQuantity(lineId, quantity) { return cartRequest("/api/cart/quantity", {line_id: lineId, quantity}); }
+
 function showStatus(message) {
   const status = document.getElementById("cart-status");
   status.textContent = message;
@@ -61,7 +118,7 @@ function showStatus(message) {
 }
 
 async function removeLine(lineId) {
-  if (!lineId) return;
+  if (!lineId || updating) return;
   document.querySelectorAll(".remove-line").forEach(button => { button.disabled = true; });
   showStatus("Убираем товар…");
   try {
@@ -72,6 +129,7 @@ async function removeLine(lineId) {
     const data = await res.json();
     if (!res.ok) { showStatus(data.error || "Не удалось убрать товар. Повторите действие."); return; }
     renderCart(data.cart);
+    renderProposal(null);
     showStatus("Товар убран из корзины.");
     (document.querySelector(".remove-line") || document.querySelector("#empty-cart .cart-return")).focus();
   } catch { showStatus("Нет связи. Товар остался в корзине. Повторите действие."); }
@@ -84,6 +142,7 @@ async function boot() {
   const data = await res.json();
   csrf = data.csrf_token;
   renderCart(data.cart || { items: [], count: 0, total: 0 });
+  renderProposal(data.proposal);
 }
 
 boot().catch(() => {

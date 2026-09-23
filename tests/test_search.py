@@ -238,3 +238,55 @@ def test_analog_requires_every_known_source_spec():
     index = CatalogIndex(products, np.array([[1, 0], [0, 1]], dtype=np.float32))
     result = search_products("a1", index=index)
     assert [item["id"] for item in result["results"]] == [1]
+
+
+def test_final_constraints_preserve_explicit_multi_product_request():
+    from app.search import constrain_results, product_hit
+
+    index = tiny_index()
+    products = [product_hit(index.get(pid)) for pid in (101, 103)]
+    assert constrain_results("Кабель ВВГ 3х2,5 и автомат 160 А", products, index=index) == products
+
+
+def test_structured_luminaire_type_prevents_rejecting_abbreviated_product_name():
+    products = [{"id": 1, "name": "НПП 1101-100 бел/круг IEK", "quantity": 2,
+                 "category": "svetilniki_lampy / svetilniki_dlya_vnutrennego_osveshcheniya",
+                 "properties": {"TIP_SVETILNIKA": "С плафоном/рассеивателем"}}]
+    index = CatalogIndex(products, np.array([[1, 0]], dtype=np.float32))
+    result = search_products("Белый круглый светильник НПП 1101-100 IEK", index=index,
+                             embed_query=lambda _q: np.array([1, 0], dtype=np.float32))
+    assert [p["id"] for p in result["results"]] == [1]
+
+
+def test_weak_semantic_match_is_rejected_and_threshold_override_is_evaluated():
+    index = CatalogIndex([{"id": 1, "name": "Товар", "quantity": 1}],
+                         np.array([[0.4, np.sqrt(1 - 0.4 ** 2)]], dtype=np.float32))
+    embed = lambda _q: np.array([1, 0], dtype=np.float32)
+    assert not search_products("нерелевантный запрос", index=index, embed_query=embed)["results"]
+    assert search_products("нерелевантный запрос", index=index, embed_query=embed, min_score=.3)["results"]
+
+
+def test_known_model_code_is_not_mistaken_for_missing_article():
+    products = [{"id": 1, "name": "Перфоратор HB-20-24 КВТ", "article": "102589", "quantity": 2}]
+    index = CatalogIndex(products, np.array([[1, 0]], dtype=np.float32))
+    def unexpected(_query):
+        raise AssertionError("A known model or missing article must not require embeddings")
+    result = search_products("hb-20-24", index=index, embed_query=unexpected)
+    assert [p["id"] for p in result["results"]] == [1]
+    assert result["results"][0]["model_match"] is True
+    assert "exact_match" not in result["results"][0]
+    assert not search_products("артикул HB-20-24", index=index, embed_query=unexpected)["results"]
+    assert not search_products("zzz-000-test", index=index, embed_query=unexpected)["results"]
+
+
+def test_shared_model_code_requires_clarification_and_article_has_priority():
+    products = [{"id": 1, "name": "Перфоратор HB-20-24 белый", "article": "a1", "quantity": 2},
+                {"id": 2, "name": "Перфоратор HB-20-24 черный", "article": "a2", "quantity": 2}]
+    index = CatalogIndex(products, np.eye(2, dtype=np.float32))
+    result = search_products("HB-20-24", index=index)
+    assert result["ambiguous"] and result["needs_clarification"]
+    products[1]["article"] = "HB-20-24"
+    index = CatalogIndex(products, np.eye(2, dtype=np.float32))
+    result = search_products("HB-20-24", index=index)
+    assert [p["id"] for p in result["results"]] == [2]
+    assert result["results"][0]["exact_match"] is True

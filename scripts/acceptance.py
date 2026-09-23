@@ -25,6 +25,7 @@ from app.attachments import validate_attachment
 from app.cart import Session, number
 from app.config import ROOT, CHAT_MODEL
 from app.search import get_index, _analogs_for
+from scripts.retrieval_eval import load_cases, score_case
 
 HTTP_URL = None
 HTTP_CLIENTS = {}
@@ -79,7 +80,7 @@ def fixtures(product):
     return paths
 
 
-def record_turn(label, query, *, files=None, expected_id=None, expect_source=False, session=None, expected_analog=False, expect_empty=False):
+def record_turn(label, query, *, files=None, expected_id=None, expect_source=False, session=None, expected_analog=False, expect_empty=False, retrieval_case=None):
     session = session or Session("acceptance-" + label)
     if HTTP_URL and session.id not in HTTP_CLIENTS:
         client = httpx.Client(base_url=HTTP_URL, timeout=65)
@@ -105,6 +106,8 @@ def record_turn(label, query, *, files=None, expected_id=None, expect_source=Fal
                   "file_review": bool(rows) if files else True,
                   "file_quantity": any(expected_id in r["candidate_product_ids"] and r["quantity"] == 2 for r in rows) if files and expected_id else True,
                   "analog": any(p.get("analog_of") for p in result.get("products", [])) if expected_analog else True}
+        if retrieval_case is not None:
+            checks["retrieval_relevance"] = score_case(retrieval_case, result.get("products", []))["passed"]
         outcome = {"label": label, "query": query, "seconds": round(time.perf_counter() - start, 3),
                    "checks": checks, "passed": all(checks.values()), "text": result["text"],
                    "product_ids": product_ids, "sources": result.get("sources", []), "review": rows}
@@ -139,8 +142,8 @@ def main():
                 "Доставка в Астану?", "Сколько стоит доставка?", "Какая минимальная сумма заказа?",
                 f"Какая минимальная партия артикула {product['article']}?"]):
             outcomes.append(record_turn(f"terms-{i}", query, expect_source=True))
-        for i, query in enumerate(["Нужен автомат 16 А", "Кабель ВВГ 3х2.5", "Светильник IP65", "Розетка накладная"]):
-            outcomes.append(record_turn(f"semantic-{i}", query))
+        for case in load_cases():
+            outcomes.append(record_turn("semantic-" + case["id"], case["query"], retrieval_case=case))
         certificate = next((p for p in index.products if p.get("certificates")), None)
         if certificate:
             outcomes.append(record_turn("certificate", f"Покажи сертификаты артикула {certificate['article']}", expected_id=certificate["id"]))

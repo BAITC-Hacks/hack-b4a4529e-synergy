@@ -58,3 +58,33 @@ def test_corrupted_products_cannot_load(tmp_path):
 def test_empty_catalog_cannot_publish(tmp_path):
     with pytest.raises(ValueError, match="No products"):
         build_index(tmp_path, tmp_path / "index", client=Obj(embeddings=Embeddings()))
+
+
+@pytest.mark.parametrize("version", [None, 999])
+def test_outdated_embedding_template_cannot_load(tmp_path, version):
+    data, target = tmp_path / "data", tmp_path / "index"
+    write_catalog(data, sample_products())
+    folder = build_index(data, target, client=Obj(embeddings=Embeddings()))
+    path = folder / "metadata.json"
+    metadata = json.loads(path.read_text())
+    if version is None:
+        metadata.pop("embedding_template_version")
+    else:
+        metadata["embedding_template_version"] = version
+    path.write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="template changed"):
+        CatalogIndex.load(target)
+
+
+def test_stock_changes_reuse_vectors_but_refresh_product_metadata(tmp_path):
+    data, target = tmp_path / "data", tmp_path / "index"
+    products = sample_products()
+    write_catalog(data, products)
+    build_index(data, target, client=Obj(embeddings=Embeddings()))
+    products[0].update(price=123, quantity=456)
+    products[0]["properties"].update(KOL_VO_U_POSTAVSHCHIKA=789)
+    write_catalog(data, products)
+    build_index(data, target, client=Obj(embeddings=Embeddings(fail=True)))
+    product = CatalogIndex.load(target).get(products[0]["id"])
+    assert product["price"] == 123 and product["quantity"] == 456
+    assert product["properties"]["KOL_VO_U_POSTAVSHCHIKA"] == 789
