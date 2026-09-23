@@ -4,7 +4,7 @@ import threading
 import time
 import uuid
 
-from .cart import Session, cart_view
+from .cart import Session, cart_view, purchase_options
 from .config import MAX_SESSIONS, SESSION_TTL
 
 _lock = threading.Lock()
@@ -37,4 +37,9 @@ def state_payload(session: Session) -> dict:
             session.pending = None
         return {"csrf_token": session.csrf_token, "cart": cart_view(session),
                 "proposal": session.pending.as_dict() if session.pending else None,
-                "history": list(session.history), "products": list(session.last_search)}
+                "history": list(session.history),
+                "products": [{**product, "purchase_options": purchase_options(session, product)}
+                             for product in session.last_search],
+                "sources": list(session.sources), "snapshot": dict(session.snapshot),
+                "attachment_review": list(session.attachment_review),
+                "attachment_issues": list(session.attachment_issues)}

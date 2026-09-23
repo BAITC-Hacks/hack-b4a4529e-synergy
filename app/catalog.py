@@ -5,6 +5,7 @@ import io
 import json
 import math
 import re
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlparse, urljoin
 
@@ -104,6 +105,18 @@ def _as_number(value):
     return number
 
 
+def _as_price(value):
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        amount = Decimal(str(value).replace(" ", "").replace(",", "."))
+    except InvalidOperation:
+        return None
+    if not amount.is_finite() or amount < 0:
+        return None
+    return int(amount) if amount == amount.to_integral_value() else format(amount, "f")
+
+
 def _stringify_prop(value) -> str | None:
     if value is None or value == "":
         return None
@@ -138,21 +151,50 @@ def safe_url(value) -> str | None:
 
 
 def extract_certificate(record: dict) -> str | None:
+    links = certificate_links(record)
+    return links[0] if links else None
+
+
+def certificate_links(record: dict) -> list[str]:
+    links = []
+    def collect(value):
+        if isinstance(value, dict):
+            for key in ("url", "src", "SRC", "file", "link"):
+                collect(value.get(key))
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+        elif isinstance(value, str):
+            for part in value.split(" | "):
+                if url := safe_url(part):
+                    if url not in links:
+                        links.append(url)
     keys = ("certificate", "certificate_url", "sertifikat", "сертификат")
     for key in keys:
-        value = record.get(key)
-        if safe_url(value):
-            return safe_url(value)
-    for item in record.get("certificates") or []:
-        value = item.get("url") if isinstance(item, dict) else item
-        if safe_url(value):
-            return safe_url(value)
+        collect(record.get(key))
+    collect(record.get("certificates"))
     for key, value in (record.get("properties") or {}).items():
-        blob = f"{key} {value}".lower()
+        blob = str(key).lower()
         if "sertifikat" in blob or "certificate" in blob or "сертификат" in blob:
-            if safe_url(value):
-                return safe_url(value)
-    return None
+            collect(value)
+    return links
+
+
+def purchase_fields(raw, properties):
+    unit = raw.get("unit") or raw.get("measure") or properties.get("CML2_BASE_UNIT")
+    if isinstance(unit, dict):
+        unit = unit.get("symbol") or unit.get("name")
+    unit = str(unit or "").strip()
+    unit_known = bool(unit and "\ufffd" not in unit and unit != "ед.")
+    minimum = _as_number(raw.get("min_quantity", raw.get("minimum_order_quantity")))
+    step = _as_number(raw.get("quantity_step", raw.get("purchase_multiple")))
+    note = ""
+    if properties.get("KRATNOST_MIN") and minimum is None and step is None:
+        note = "Исходное поле KRATNOST_MIN: " + str(properties["KRATNOST_MIN"]) + ". Значение минимума/кратности требует подтверждения поставщика."
+    return {"unit": unit if unit_known else "ед.", "unit_known": unit_known,
+            "min_quantity": minimum if minimum and minimum > 0 else None,
+            "quantity_step": step if step and step > 0 else None,
+            "purchase_rule_note": note}
 
 
 def spec_snippet(record: dict, limit: int = 280) -> str:
@@ -245,7 +287,7 @@ def normalize_product(raw: dict) -> dict | None:
             "id": product_id,
             "name": name,
             "article": str(raw.get("article") or "").strip(),
-            "price": _as_number(raw.get("price")),
+            "price": _as_price(raw.get("price")),
             "quantity": _as_number(raw.get("quantity")),
             "image": safe_url(raw.get("image")),
             "url": safe_url(raw.get("url")),
@@ -254,9 +296,9 @@ def normalize_product(raw: dict) -> dict | None:
             "properties": properties,
             "stores": stores,
             "certificate": extract_certificate({**raw, "properties": properties}),
-            "unit": str(raw.get("unit") or "ед."),
-            "min_quantity": _as_number(raw.get("min_quantity")),
-            "quantity_step": _as_number(raw.get("quantity_step")),
+            "certificates": certificate_links({**raw, "properties": properties}),
+            "certificate_references": properties.get("FILES_CERTIFICATES") or [],
+            **purchase_fields(raw, properties),
         }
     )
     product["spec_snippet"] = spec_snippet(product)
@@ -266,7 +308,14 @@ def normalize_product(raw: dict) -> dict | None:
 def _merge(base: dict, incoming: dict) -> dict:
     merged = dict(base)
     for key, value in incoming.items():
-        if key in ("properties", "stores"):
+        if key == "properties":
+            merged[key] = {**merged.get(key, {}), **value}
+            continue
+        if key == "unit" and value == "ед." and merged.get("unit_known"):
+            continue
+        if key == "unit_known" and not value and merged.get("unit_known"):
+            continue
+        if key == "stores":
             if value:
                 merged[key] = value
             continue

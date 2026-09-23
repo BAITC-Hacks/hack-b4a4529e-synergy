@@ -3,7 +3,7 @@ import json
 import numpy as np
 
 from app.catalog import category_from_url, load_products
-from app.search import CatalogIndex, search_products
+from app.search import CatalogIndex, exact_matches, search_products
 from tests.helpers import sample_products, tiny_index
 
 
@@ -94,9 +94,60 @@ def test_exact_article_returns_price():
     top = result["results"][0]
     assert top["article"] == "200300285_"
     assert top["price"] == 64920
+    assert top["exact_match"] is True
 
 
-def test_out_of_stock_returns_analog_with_reason():
+def test_specification_numbers_do_not_override_semantic_search():
+    products = sample_products()
+    products[0]["properties"]["ARTIKULPOSTAVSHCHIKA"] = "18"
+    index = CatalogIndex(products, np.eye(len(products), dtype=np.float32))
+    assert exact_matches(index, "светильник 18 Вт IP65") == []
+    assert exact_matches(index, "автомат 101 А") == []
+    assert exact_matches(index, "артикул 18")[0]["id"] == 101
+    assert exact_matches(index, "101")[0]["id"] == 101
+    assert exact_matches(index, "товар ID 101")[0]["id"] == 101
+    result = search_products("светильник 18 Вт IP65", index=index,
+                             embed_query=lambda _q: np.array([0, 0, 1], dtype=np.float32))
+    assert result["results"] == []
+    assert result["needs_clarification"] is True
+
+
+def test_semantic_search_excludes_conflicting_current_rating():
+    products = [
+        {"id": 1, "name": "Автомат 16А", "article": "a1", "price": 10, "quantity": 2},
+        {"id": 2, "name": "Автомат 160А", "article": "a2", "price": 20, "quantity": 2},
+    ]
+    index = CatalogIndex(products, np.array([[.8, .6], [1, 0]], dtype=np.float32))
+    result = search_products("Автомат 16 А", index=index,
+                             embed_query=lambda _q: np.array([1, 0], dtype=np.float32))
+    assert [item["id"] for item in result["results"]] == [1]
+
+
+def test_broad_search_keeps_unavailable_relevant_match():
+    products = sample_products()
+    embeddings = np.array([[0.99, 0.1, 0], [1, 0, 0], [0.8, 0.6, 0]], dtype=np.float32)
+    index = CatalogIndex(products, embeddings)
+    result = search_products("автомат", limit=2, index=index,
+                             embed_query=lambda _q: np.array([1, 0, 0], dtype=np.float32))
+    assert result["results"][0]["id"] == 102
+    assert result["results"][0]["availability"] == "out_of_stock"
+    assert any(item["id"] == 101 for item in result["results"][1:])
+    assert all(item["id"] != 103 for item in result["results"])
+
+
+def test_missing_requested_spec_is_marked_unverified():
+    products = [
+        {"id": 1, "name": "Автомат без указанного тока", "article": "a1", "price": 10, "quantity": 2},
+        {"id": 2, "name": "Автомат 16А", "article": "a2", "price": 20, "quantity": 2},
+    ]
+    index = CatalogIndex(products, np.array([[1, 0], [.8, .6]], dtype=np.float32))
+    result = search_products("Автомат 16 А", index=index,
+                             embed_query=lambda _q: np.array([1, 0], dtype=np.float32))
+    assert result["results"][0]["id"] == 2
+    assert result["results"][1]["unverified_specs"] == ["ток"]
+
+
+def test_exact_out_of_stock_article_returns_analog_with_reason():
     products = sample_products()
     embeddings = np.array(
         [
@@ -108,7 +159,7 @@ def test_out_of_stock_returns_analog_with_reason():
     )
     index = CatalogIndex(products, embeddings)
     result = search_products(
-        "DRX250 которого нет",
+        "200300000_",
         limit=3,
         index=index,
         embed_query=lambda _q: np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
@@ -118,3 +169,15 @@ def test_out_of_stock_returns_analog_with_reason():
     assert analogs
     assert analogs[0]["id"] == 101
     assert "категория" in analogs[0]["analog_reason"]
+
+
+def test_analog_requires_every_known_source_spec():
+    products = [
+        {"id": 1, "name": "УЗО 16А 2P", "article": "a1", "price": 10,
+         "quantity": 0, "category": "uzo"},
+        {"id": 2, "name": "УЗО 2P", "article": "a2", "price": 10,
+         "quantity": 5, "category": "uzo"},
+    ]
+    index = CatalogIndex(products, np.array([[1, 0], [0, 1]], dtype=np.float32))
+    result = search_products("a1", index=index)
+    assert [item["id"] for item in result["results"]] == [1]

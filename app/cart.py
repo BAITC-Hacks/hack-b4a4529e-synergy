@@ -5,7 +5,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 
 from .config import PROPOSAL_TTL
 
@@ -30,6 +30,10 @@ def json_number(value: Decimal):
     return int(value) if value == value.to_integral_value() else float(value)
 
 
+def money_value(value: Decimal) -> str:
+    return format(value.quantize(CENT, rounding=ROUND_HALF_UP), "f")
+
+
 def format_kzt(value) -> str:
     if value is None:
         return "—"
@@ -49,6 +53,7 @@ class CartLine:
     unit: str = "ед."
     minimum: Decimal | None = None
     step: Decimal | None = None
+    line_id: str = field(default_factory=lambda: secrets.token_urlsafe(12))
 
     @property
     def line_total(self) -> Decimal:
@@ -56,9 +61,10 @@ class CartLine:
 
     def as_dict(self) -> dict:
         return {
-            "product_id": self.product_id, "name": self.name, "article": self.article,
+            "line_id": self.line_id, "product_id": self.product_id,
+            "name": self.name, "article": self.article,
             "quantity": json_number(self.quantity), "unit": self.unit,
-            "unit_price": json_number(self.unit_price), "line_total": json_number(self.line_total),
+            "unit_price": money_value(self.unit_price), "line_total": money_value(self.line_total),
             "stock": json_number(self.stock), "price_label": format_kzt(self.unit_price),
             "total_label": format_kzt(self.line_total),
         }
@@ -89,6 +95,11 @@ class Session:
     completed: list[str] = field(default_factory=list)
     last_search: list[dict] = field(default_factory=list)
     history: list[dict] = field(default_factory=list)
+    product_context: list[dict] = field(default_factory=list)
+    sources: list[dict] = field(default_factory=list)
+    attachment_review: list[dict] = field(default_factory=list)
+    attachment_issues: list[str] = field(default_factory=list)
+    snapshot: dict = field(default_factory=dict)
     last_seen: float = field(default_factory=time.time)
     lock: object = field(default_factory=threading.RLock, repr=False)
 
@@ -96,8 +107,34 @@ class Session:
 def cart_view(session: Session) -> dict:
     total = sum((line.line_total for line in session.cart), Decimal(0))
     count = sum((line.quantity for line in session.cart), Decimal(0))
-    return {"items": [line.as_dict() for line in session.cart], "total": json_number(total),
+    return {"items": [line.as_dict() for line in session.cart], "total": money_value(total),
             "count": json_number(count), "total_label": format_kzt(total), "url": "/cart"}
+
+
+def purchase_options(session: Session, product: dict) -> dict:
+    """Values for the quantity control; _line remains the final authority."""
+    unit = product.get("unit") or "ед."
+    existing = sum((line.quantity for line in session.cart if line.product_id == product["id"]), Decimal(0))
+    if product.get("quantity") is None or product.get("price") is None:
+        return {"can_add": False, "reason": "Цена или остаток неизвестны."}
+    stock = number(product["quantity"])
+    remaining = max(Decimal(0), stock - existing)
+    step = number(product["quantity_step"]) if product.get("quantity_step") is not None else None
+    minimum = number(product["min_quantity"]) if product.get("min_quantity") is not None else None
+    fractional = unit.lower() in {"м", "м.", "метр", "кг", "kg", "m"}
+    increment = step or (None if fractional else Decimal(1))
+    needed = max(Decimal(0), (minimum or Decimal(0)) - existing)
+    if increment:
+        suggested = max(increment, (needed / increment).to_integral_value(rounding=ROUND_CEILING) * increment)
+    else:
+        suggested = max(needed, min(Decimal(1), remaining))
+    can_add = (remaining > 0 and suggested > 0 and suggested <= remaining
+               and (increment is None or increment > 0))
+    reason = "" if can_add else ("Весь доступный остаток уже в корзине." if remaining <= 0
+                                 else "Остатка недостаточно для минимального количества или кратности.")
+    return {"can_add": can_add, "reason": reason, "existing": str(existing), "remaining": str(remaining),
+            "suggested_quantity": str(suggested), "step": str(increment) if increment else "any",
+            "unit": unit}
 
 
 def user_confirms_add(text: str, has_pending: bool) -> bool:
@@ -217,3 +254,14 @@ def cancel_pending(session: Session, proposal_id: str) -> dict:
             return _err("предложение уже неактуально")
         session.pending = None
         return {"ok": True, "status": "cancelled"}
+
+
+def remove_cart_line(session: Session, line_id: str) -> dict:
+    with session.lock:
+        for index, line in enumerate(session.cart):
+            if line.line_id == line_id:
+                session.cart.pop(index)
+                session.pending = None
+                session.revision += 1
+                return {"ok": True, "status": "removed", "cart": cart_view(session)}
+        return _err("товар уже удалён из корзины")

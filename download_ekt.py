@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 
 import aiohttp
@@ -19,7 +20,6 @@ LIST_PATH = OUT / "list_checkpoint.txt"
 CONCURRENCY = int(os.environ.get("EKT_CONCURRENCY", "64"))
 LIST_PAGE_SIZE = 500
 LIST_CONCURRENCY = min(CONCURRENCY, 4)
-DETAIL_BATCH_SIZE = 20
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=25, sock_connect=10, sock_read=20)
 LIST_TIMEOUT = aiohttp.ClientTimeout(total=60, sock_connect=10, sock_read=55)
 COLUMNS = [
@@ -88,6 +88,18 @@ def row_from_detail(data: dict) -> dict:
         "properties": flat(data.get("properties")),
         "offers": flat(data.get("offers")),
     }
+
+
+def save_detail(data: dict, root: Path | None = None) -> None:
+    """Publish a lossless detail without modifying the append-only CSV schema."""
+    product_id = data.get("id")
+    if type(product_id) is not int or product_id <= 0 or not data.get("name"):
+        raise ValueError("Invalid product detail")
+    directory = (root or OUT) / "details"
+    directory.mkdir(parents=True, exist_ok=True)
+    temporary = directory / f".{product_id}-{uuid.uuid4().hex}.tmp"
+    temporary.write_text(json.dumps(data, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+    os.replace(temporary, directory / f"{product_id}.json")
 
 
 def spreadsheet_row(row: dict) -> dict:
@@ -234,10 +246,8 @@ async def collect_pages(
         if number in scheduled:
             return
         scheduled.add(number)
-        for start in range(0, len(ids), DETAIL_BATCH_SIZE):
-            batch = ids[start : start + DETAIL_BATCH_SIZE]
-            if not all(item_id in saved_ids for item_id in batch):
-                queue.put_nowait((number, batch))
+        if not all(item_id in saved_ids for item_id in ids):
+            queue.put_nowait((number, ids))
 
     async def fetch_list(number: int) -> list[int]:
         data = await get_json(
@@ -334,6 +344,7 @@ async def download_details(
 
     async def fetch_row(product_id: int) -> dict:
         detail = await get_json(session, f"{BASE}/detail?id={product_id}", sem)
+        save_detail(detail)
         return row_from_detail(detail)
 
     async def worker() -> None:
@@ -352,9 +363,10 @@ async def download_details(
                 writer.failed += len(errors)
                 for product_id, exc in errors:
                     print(f"detail failed page={number} id={product_id} {exc}", flush=True)
-                continue
-            async with lock:
-                writer.commit_page(number, rows)
+            successful_rows = [row for row in rows if not isinstance(row, Exception)]
+            if successful_rows:
+                async with lock:
+                    writer.commit_page(number, successful_rows)
 
     workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY)]
     await asyncio.gather(*workers)

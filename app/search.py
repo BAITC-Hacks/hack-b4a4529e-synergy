@@ -11,6 +11,8 @@ import numpy as np
 from openai import OpenAI
 
 from .catalog import public_properties, safe_url
+from .alternatives import compare, family, normalized, specs
+from .cart import format_kzt
 from .config import EMBED_MODEL, INDEX_DIR, openai_api_key
 
 TOKEN_RE = re.compile(r"[0-9a-zа-яё._-]{2,}", re.IGNORECASE)
@@ -104,12 +106,15 @@ def product_hit(product: dict, score: float | None = None) -> dict:
     hit = {key: product.get(key) for key in ("id", "name", "article", "price", "quantity", "category", "spec_snippet")}
     hit.update({
         "availability": "unknown" if quantity is None else "in_stock" if quantity > 0 else "out_of_stock",
+        "price_label": format_kzt(product.get("price")),
         "unit": product.get("unit") or "ед.",
         "image": safe_url(product.get("image")), "url": safe_url(product.get("url")),
         "certificate": safe_url(product.get("certificate")),
+        "certificates": [url for value in product.get("certificates", []) if (url := safe_url(value))],
         "properties": public_properties(product.get("properties")),
         "stores": product.get("stores") or [],
         "min_quantity": product.get("min_quantity"), "quantity_step": product.get("quantity_step"),
+        "purchase_rule_note": product.get("purchase_rule_note") or "",
     })
     if score is not None:
         hit["score"] = round(float(score), 4)
@@ -125,10 +130,19 @@ def exact_matches(index: CatalogIndex, query: str) -> list[dict]:
     key = _article_key(query)
     for product in index.by_article.get(key, []):
         found[product["id"]] = product
+    if key.isdigit() and (product := index.get(int(key))):
+        found[product["id"]] = product
+    explicit_codes = {
+        _article_key(match.group(1))
+        for match in re.finditer(r"(?:артикул(?:а|у|ом)?|article|id|код(?:а|у|ом)?)\s*[:№#]?\s*([0-9a-zа-яё._-]+)", query, re.I)
+    }
     for token in _tokens(query):
+        # Short numbers in descriptions are usually watts, amperes or quantities.
+        if token.isdigit() and len(token) < 6 and token not in explicit_codes:
+            continue
         for product in index.by_article.get(_article_key(token), []):
             found[product["id"]] = product
-        if token.isdigit() and (product := index.get(int(token))):
+        if token.isdigit() and token in explicit_codes and (product := index.get(int(token))):
             found[product["id"]] = product
     return list(found.values())
 
@@ -143,73 +157,24 @@ def _embed_query(text: str, model: str) -> np.ndarray:
     return vector / np.linalg.norm(vector)
 
 
-SPEC_KEYS = {
-    "ток": ("NOMINALNYY_TOK",),
-    "напряжение": ("NOMINALNOE_NAPRYAZHENIE", "NAPRYAZHENIE"),
-    "полюса": ("KOLICHESTVO_POLYUSOV",),
-    "отключающая способность": ("NOMINALNAYA_OTKLYUCHAYUSHCHAYA_SPOSOBNOST",),
-    "характеристика": ("KHARAKTERISTIKA_SRABATYVANIYA",),
-    "монтаж": ("TIP_USTANOVKI", "SPOSOB_MONTAZHA"),
-    "сечение": ("SECHENIE", "SECHENIE_ZHILY"),
-    "число жил": ("KOLICHESTVO_ZHIL",),
-    "материал жилы": ("MATERIAL_ZHILY",),
-    "цоколь": ("TIP_TSOKOLYA",),
-    "мощность": ("MOSHCHNOST_W", "MOSHCHNOST"),
-    "температура света": ("TSVETOVAYA_TEMPERATURA",),
-    "защита": ("STEPEN_ZASHCHITY_IP", "STEPEN_ZASHCHITY"),
-    "тип лампы": ("TIP_LAMPY",),
-}
-
-
-def _spec_value(value) -> str:
-    return re.sub(r"\s+", "", str(value).lower().replace(",", ".").translate(str.maketrans("авкх", "abkx")))
-
-
 def technical_specs(product: dict) -> dict:
-    props = product.get("properties") or {}
-    result = {label: _spec_value(props[key]) for label, keys in SPEC_KEYS.items()
-              for key in keys if props.get(key) not in (None, "")}
-    name = product.get("name") or ""
-    patterns = {
-        "ток": r"(?<![\w.])(\d+(?:[.,]\d+)?)\s*[аa](?![a-zа-я])",
-        "полюса": r"(?<!\w)([1-4])\s*[pрф](?![a-zа-я])",
-        "отключающая способность": r"(\d+(?:[.,]\d+)?)\s*[кk][аa]",
-        "защита": r"\bIP\s*(\d{2})",
-        "температура света": r"(\d{4})\s*[kк]\b",
-    }
-    for label, pattern in patterns.items():
-        if label not in result and (match := re.search(pattern, name, re.I)):
-            value = match.group(1)
-            if label == "ток":
-                value += "A"
-            result[label] = _spec_value(value)
-    if match := re.search(r"\b(\d+)\s*[xх×]\s*(\d+(?:[.,]\d+)?)", name, re.I):
-        result.setdefault("число жил", match.group(1))
-        result.setdefault("сечение", match.group(2).replace(",", "."))
-    return result
+    return {label: normalized(label, value) for label, value in specs(product).items()}
 
 
 def _analogs_for(index: CatalogIndex, source: dict, limit: int) -> list[dict]:
-    original = technical_specs(source)
     ranked = []
     for product in index.products:
         if product["id"] == source["id"] or (product.get("quantity") or 0) <= 0:
             continue
-        if not source.get("category") or source["category"] != product.get("category"):
-            continue
-        specs = technical_specs(product)
-        common = original.keys() & specs.keys()
-        if not common or any(original[key] != specs[key] for key in common):
+        comparison = compare(source, product)
+        if not comparison:
             continue
         overlap = _tokens(source["name"]) & _tokens(product["name"])
-        missing = sorted(original.keys() - specs.keys())
-        reason = "Та же категория; совпадают " + ", ".join(f"{key}: {original[key]}" for key in sorted(common))
-        reason += ". Перед заменой проверьте полный набор характеристик."
-        if missing:
-            reason += " Не указаны: " + ", ".join(missing) + "."
         hit = product_hit(product)
-        hit.update(analog_of=source["id"], analog_reason=reason, compatibility="candidate_requires_review")
-        ranked.append((len(common), len(overlap), product["id"], hit))
+        hit.update(analog_of=source["id"], analog_reason=comparison["reason"],
+                   compatibility=comparison["compatibility"], comparison=comparison)
+        rank = len(comparison["matches"]) + (100 if comparison["compatibility"] == "supported_alternative" else 0)
+        ranked.append((rank, len(overlap), product["id"], hit))
     ranked.sort(key=lambda x: (-x[0], -x[1], x[2]))
     return [x[3] for x in ranked[:limit]]
 
@@ -222,20 +187,48 @@ def search_products(query: str, limit: int = 5, *, index=None, embed_query=None)
         return {"results": [], "error": "пустой запрос"}
     exact = exact_matches(catalog, query)
     if exact:
-        hits = [product_hit(product, 1.0) for product in exact[:limit]]
+        hits = [{**product_hit(product, 1.0), "exact_match": True} for product in exact[:limit]]
     else:
         vector = embed_query(query) if embed_query else _embed_query(query, catalog.metadata["model"])
         if vector.shape != (catalog.embeddings.shape[1],):
             raise ValueError("Query embedding dimensions differ from index")
         scores = catalog.embeddings @ vector
-        order = np.argsort(-scores)[:limit]
-        hits = [product_hit(catalog.products[int(i)], float(scores[i])) for i in order if scores[i] >= MIN_SCORE]
+        wanted = technical_specs({"name": query})
+        wanted_family = family({"name": query})
+        order = np.argsort(-scores)
+        verified, uncertain = [], []
+        for i in order:
+            if scores[i] < MIN_SCORE:
+                break
+            product = catalog.products[int(i)]
+            product_family = family(product)
+            if wanted_family and product_family and wanted_family != product_family:
+                continue
+            actual = technical_specs(product)
+            if any(key in actual and actual[key] != value for key, value in wanted.items()):
+                continue
+            missing = sorted(wanted.keys() - actual.keys())
+            hit = product_hit(product, float(scores[i]))
+            if missing:
+                hit["unverified_specs"] = missing
+                uncertain.append(hit)
+            else:
+                verified.append(hit)
+            if len(verified) >= limit:
+                break
+        hits = (verified + uncertain)[:limit]
     if hits and hits[0]["availability"] == "out_of_stock":
         analogs = _analogs_for(catalog, catalog.get(hits[0]["id"]), 3)
-        # Unfiltered semantic neighbors are not presented as substitutes.
-        hits = [hits[0], *analogs] if len(exact) <= 1 else hits
+        if len(exact) <= 1:
+            seen = {hits[0]["id"]}
+            combined = [hits[0]]
+            for hit in [*analogs, *hits[1:]]:
+                if hit["id"] not in seen:
+                    combined.append(hit)
+                    seen.add(hit["id"])
+            hits = combined[:max(limit, len(analogs) + 1)]
     return {"query": query, "results": hits, "ambiguous": len(exact) > 1,
-            "needs_clarification": not hits or len(exact) > 1,
+            "needs_clarification": not hits or len(exact) > 1 or bool(hits[0].get("unverified_specs")),
             "snapshot": catalog.metadata,
             "note": "Остатки и цены из снимка; добавление не резервирует товар."}
 
@@ -246,6 +239,7 @@ def get_product(product_id: int, *, index=None) -> dict:
     if not product:
         return {"error": "товар не найден"}
     detail = product_detail(product)
+    detail["exact_match"] = True
     if product.get("quantity") == 0:
         detail["analogs"] = _analogs_for(catalog, product, 3)
     detail["snapshot"] = catalog.metadata

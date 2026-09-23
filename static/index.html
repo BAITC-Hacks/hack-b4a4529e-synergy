@@ -4,12 +4,6 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Консультант Электрокомплект</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans+Condensed:wght@500;600;700&display=swap"
-      rel="stylesheet"
-    />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -26,16 +20,24 @@
         </a>
       </header>
 
-      <main id="log" class="log" aria-live="polite">
+      <main id="log" class="log" aria-label="Переписка">
         <div class="welcome" id="welcome">
-          <p class="welcome-lead">Спросите по артикулу или названию.</p>
+          <p class="welcome-label">Поиск по каталогу</p>
+          <p class="welcome-lead">Найдём нужный товар.</p>
           <p class="welcome-sub">
-            Наличие и цена — из снимка каталога. Чтобы положить позицию в корзину, подтвердите количество на накладной.
+            Напишите артикул, название или опишите задачу. Покажем товары, цены и остатки из каталога.
           </p>
+          <div class="suggestions" aria-label="Примеры запросов">
+            <button type="button" class="suggestion">Автоматический выключатель 16 А</button>
+            <button type="button" class="suggestion">Кабель ВВГ 3×2,5</button>
+            <button type="button" class="suggestion">Розетка накладная</button>
+          </div>
         </div>
       </main>
 
-      <p id="status" class="status" hidden></p>
+      <p id="announcement" class="sr-only" aria-live="polite"></p>
+
+      <p id="status" class="status" role="status" hidden></p>
 
       <form id="composer" class="composer">
         <input
@@ -53,11 +55,15 @@
           id="message"
           name="message"
           rows="1"
-          placeholder="Артикул, название или вопрос по наличию"
+          maxlength="8000"
+          placeholder="Введите запрос"
         ></textarea>
         <button type="submit" class="send" id="send">Отправить</button>
         <ul id="chips" class="file-list" hidden></ul>
       </form>
+      <p class="prototype-note">Демо: заказ не оформляется · цены и остатки из снимка каталога</p>
+      <p class="prototype-note">Сообщения и файлы обрабатываются AI-провайдером. Файлы не сохраняются в чате. Не отправляйте платёжные данные.</p>
+      <p class="prototype-note">До 5 файлов: 10 МБ каждый, 20 МБ всего. Excel/CSV — до 1000 строк на лист. Изображения внутри Word/Excel приложите как PDF или фото.</p>
     </div>
     <script src="/static/chat.js"></script>
   </body>

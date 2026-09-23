@@ -4,16 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Корзина — Электрокомплект</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans+Condensed:wght@500;600;700&display=swap"
-      rel="stylesheet"
-    />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <div class="desk">
+    <div class="desk cart-desk">
       <header class="mast">
         <a class="mark" href="/" aria-label="Назад в чат">ЭК</a>
         <div class="mast-copy">
@@ -24,9 +18,12 @@
       </header>
 
       <main class="cart-page">
-        <p id="empty-cart" class="empty-cart">
-          Корзина пуста. Вернитесь в чат, выберите позицию и подтвердите накладную.
-        </p>
+        <div id="empty-cart" class="empty-cart">
+          <h2>Корзина пока пуста</h2>
+          <p>Найдите товар в каталоге и подтвердите добавление в чате.</p>
+          <a class="cart-return" href="/">Найти товар</a>
+        </div>
+        <div class="cart-scroll">
         <table class="sheet" id="sheet" hidden>
           <thead>
             <tr>
@@ -35,11 +32,15 @@
               <th>Кол-во</th>
               <th>Цена</th>
               <th>Сумма</th>
+              <th><span class="sr-only">Действие</span></th>
             </tr>
           </thead>
           <tbody id="rows"></tbody>
         </table>
+        </div>
         <p class="grand" id="grand" hidden></p>
+        <p id="cart-status" class="cart-status" role="status" hidden></p>
+        <p class="prototype-note">Демонстрационная корзина. Товар не резервируется, заказ не оформляется.</p>
       </main>
     </div>
     <script src="/static/cart.js"></script>

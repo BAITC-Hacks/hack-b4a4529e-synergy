@@ -77,6 +77,11 @@ def build_index(data_dir: Path | None = None, index_dir: Path | None = None, *, 
         "vectors_sha256": digest((folder / "embeddings.npy").read_bytes()),
         "known_stock": sum(p.get("quantity") is not None for p in products),
         "certificates": sum(bool(p.get("certificate")) for p in products),
+        "known_prices": sum(p.get("price") is not None for p in products),
+        "known_units": sum(bool(p.get("unit_known")) for p in products),
+        "minimum_quantities": sum(p.get("min_quantity") is not None for p in products),
+        "purchase_multiples": sum(p.get("quantity_step") is not None for p in products),
+        "unresolved_certificates": sum(bool(p.get("certificate_references")) and not p.get("certificates") for p in products),
     }
     (folder / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     # Validate exactly what the server will load before publishing a single pointer.

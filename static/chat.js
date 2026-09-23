@@ -7,29 +7,23 @@ const fileInput = document.getElementById("file");
 const attachBtn = document.getElementById("attach");
 const chips = document.getElementById("chips");
 const statusEl = document.getElementById("status");
+const announcement = document.getElementById("announcement");
 const cartCount = document.getElementById("cart-count");
 
+document.querySelectorAll(".suggestion").forEach(button => {
+  button.addEventListener("click", () => {
+    input.value = button.textContent;
+    input.focus();
+  });
+});
+
 let files = [];
-
-function showStatus(text) {
-  if (!text) {
-    statusEl.hidden = true;
-    statusEl.textContent = "";
-    return;
-  }
-  statusEl.hidden = false;
-  statusEl.textContent = text;
-}
-
-function updateCart(cart) {
-  cartCount.textContent = cart && cart.count ? String(cart.count) : "0";
-}
-
-function addNode(node) {
-  welcome.hidden = true;
-  log.appendChild(node);
-  node.scrollIntoView({ block: "end" });
-}
+let csrf = "";
+let proposal = null;
+let busy = true;
+let expiryTimer;
+const draftQuantities = new Map();
+let currentState = { history: [], products: [], proposal: null, cart: { count: 0 } };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -38,199 +32,380 @@ function el(tag, className, text) {
   return node;
 }
 
-function renderUser(text, names) {
-  const box = el("article", "bubble user");
-  box.appendChild(el("p", "meta-line", "Вы"));
-  if (text) box.appendChild(el("p", null, text));
-  if (names && names.length) {
-    box.appendChild(el("p", "meta-line", names.join(" · ")));
-  }
-  addNode(box);
-}
-
-function stockLabel(item) {
-  if (item.availability === "unknown" || item.quantity == null) {
-    return "остаток неизвестен";
-  }
-  if (item.quantity <= 0) return "нет в наличии";
-  return `${item.quantity} шт`;
-}
-
 function money(value) {
-  if (value == null) return "—";
-  return `${Math.round(value).toLocaleString("ru-RU")} ₸`;
+  return value == null ? "—" : Number(value).toLocaleString("ru-RU", { maximumFractionDigits: 2 }) + " ₸";
+}
+
+function showStatus(text) {
+  statusEl.textContent = text;
+  statusEl.hidden = !text;
+}
+
+function setBusy(value) {
+  busy = value;
+  sendBtn.disabled = value;
+  attachBtn.disabled = value;
+  input.disabled = value;
+  log.querySelectorAll("button").forEach(button => { button.disabled = value; });
+  log.querySelectorAll("input").forEach(field => { field.disabled = value; });
+  log.querySelectorAll("select").forEach(field => { field.disabled = value; });
+}
+
+function safeLink(label, value) {
+  try {
+    const url = new URL(value, location.origin);
+    if (!["http:", "https:"].includes(url.protocol)) return null;
+    const link = el("a", null, label);
+    link.href = url.href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    return link;
+  } catch { return null; }
+}
+
+function bubble(role, text) {
+  const node = el("article", role === "user" ? "bubble user" : "bubble");
+  node.append(el("p", "meta-line", role === "user" ? "Вы" : "Консультант"), el("p", "message-text", text));
+  log.append(node);
+  return node;
 }
 
 function renderHits(items) {
-  if (!items || !items.length) return;
+  if (!items?.length) return;
+  const visibleItems = items.filter(item => Number(item.quantity) > 0 || item.exact_match);
+  if (!visibleItems.length) return;
   const wrap = el("div", "hits");
-  for (const item of items) {
+  for (const item of visibleItems) {
     const row = el("article", "hit");
+    const thumb = el("div", "hit-thumb");
     if (item.image) {
-      const img = el("img");
-      img.src = item.image;
-      img.alt = "";
-      row.appendChild(img);
+      const image = el("img");
+      image.alt = "";
+      image.addEventListener("error", () => thumb.remove());
+      thumb.append(image);
+      image.src = item.image;
+    }
+    const body = el("div", "hit-main");
+    body.append(el("p", "article", "Артикул " + (item.article || "ID " + item.id)), el("h3", null, item.name));
+    if (item.analog_reason) body.append(el("p", "article", item.analog_reason));
+    const summary = el("div", "hit-summary");
+    summary.append(el("strong", "hit-price", item.price_label || money(item.price)));
+    const options = item.purchase_options || { can_add: false, reason: "Обновите страницу для проверки количества." };
+    const stock = item.quantity == null ? "Остаток неизвестен" : item.quantity <= 0 ? "Нет по снимку каталога"
+      : "По снимку: " + item.quantity + " " + (item.unit || "ед.")
+        + (Number(options.existing) ? " · В корзине: " + options.existing : "");
+    summary.append(el("span", item.quantity === 0 ? "stock out" : "stock", stock));
+    body.append(summary);
+    if (item.min_quantity) body.append(el("p", "article", "Минимальная партия: " + item.min_quantity + " " + item.unit));
+    if (item.quantity_step) body.append(el("p", "article", "Кратность: " + item.quantity_step + " " + item.unit));
+    if (item.purchase_rule_note) body.append(el("p", "article", item.purchase_rule_note));
+    const meta = el("div", "hit-meta");
+    const details = el("details", "product-details");
+    details.append(el("summary", null, "Характеристики"));
+    if (item.spec_snippet) details.append(el("p", null, item.spec_snippet));
+    for (const [key, value] of Object.entries(item.properties || {})) details.append(el("p", null, key + ": " + value));
+    for (const store of item.stores || []) {
+      if (store.quantity != null && store.quantity > 0) details.append(el("p", null, store.name + ": " + store.quantity));
+    }
+    if (details.childElementCount > 1) meta.append(details);
+    const links = el("div", "product-links");
+    const certificates = [...new Set([item.certificate, ...(item.certificates || [])].filter(Boolean))];
+    for (const [label, url] of [["Открыть на ekt.kz", item.url], ...certificates.map((url, i) => ["Сертификат " + (i + 1), url])]) {
+      if (url) { const link = safeLink(label, url); if (link) links.append(link); }
+    }
+    if (links.childNodes.length) meta.append(links);
+    if (meta.childNodes.length) body.append(meta);
+    if (item.unverified_specs?.length) {
+      body.append(el("p", "cart-limit", "Не подтверждены характеристики: " + item.unverified_specs.join(", ") + ". Уточните перед выбором."));
+    }
+    if (options.can_add && !item.unverified_specs?.length) {
+      const controls = el("div", "hit-actions");
+      const label = el("label", "quantity-label", "Количество");
+      const quantity = el("input", "quantity-input");
+      quantity.type = "number";
+      quantity.inputMode = "decimal";
+      quantity.min = options.suggested_quantity;
+      quantity.step = options.step;
+      quantity.value = draftQuantities.get(item.id) || options.suggested_quantity;
+      quantity.max = options.remaining;
+      quantity.setAttribute("aria-label", "Количество для " + item.name);
+      quantity.addEventListener("input", () => draftQuantities.set(item.id, quantity.value));
+      label.append(quantity, el("span", "quantity-unit", item.unit || "ед."));
+      const add = el("button", "primary add-product", "К подтверждению");
+      add.type = "button";
+      add.addEventListener("click", () => {
+        const value = Number(quantity.value);
+        if (!quantity.value || !Number.isFinite(value) || value <= 0) {
+          quantity.focus();
+          showStatus("Укажите количество больше нуля.");
+          return;
+        }
+        if (quantity.validity.rangeOverflow) {
+          quantity.focus();
+          showStatus("Доступно для добавления: " + options.remaining + " " + (item.unit || "ед."));
+          return;
+        }
+        if (!quantity.checkValidity()) {
+          quantity.focus();
+          showStatus("Проверьте количество товара.");
+          return;
+        }
+        prepareProduct(item.id, quantity.value);
+      });
+      controls.append(label, add);
+      if (item.image) row.append(thumb);
+      row.append(body, controls);
     } else {
-      row.appendChild(el("div", "hit-ph", "ЭК"));
+      if (item.image) row.append(thumb);
+      row.append(body);
+      if (options.reason && !item.unverified_specs?.length)
+        body.append(el("p", "cart-limit", options.reason));
     }
-    const body = el("div");
-    body.appendChild(el("p", "article", item.article || `id ${item.id}`));
-    body.appendChild(el("h3", null, item.name));
-    if (item.analog_reason) {
-      body.appendChild(el("p", "article", `аналог: ${item.analog_reason}`));
-    }
-    row.appendChild(body);
-    const fig = el("p", "fig");
-    fig.appendChild(document.createTextNode(money(item.price)));
-    const stock = el("span", item.availability === "out_of_stock" ? "stock out" : "stock");
-    stock.textContent = stockLabel(item);
-    fig.appendChild(stock);
-    row.appendChild(fig);
-    wrap.appendChild(row);
+    wrap.append(row);
   }
-  addNode(wrap);
+  log.append(wrap);
 }
 
-function renderProposal(proposal) {
-  if (!proposal) return;
+async function prepareProduct(productId, quantity) {
+  if (busy) return;
+  setBusy(true);
+  showStatus("Готовим товар к добавлению…");
+  try {
+    const res = await fetch("/api/cart/propose", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+      body: JSON.stringify({ product_id: productId, quantity })
+    });
+    const data = await res.json();
+    if (data.cart) renderState(data);
+    showStatus(res.ok ? "" : data.error || (res.status === 404
+      ? "Обновите страницу и повторите действие."
+      : res.status === 422 ? "Проверьте количество и повторите действие."
+      : "Не удалось подготовить товар. Повторите действие."));
+  } catch { showStatus("Нет связи. Попробуйте ещё раз."); }
+  finally { setBusy(false); }
+}
+
+function renderProposal(value) {
+  proposal = value;
+  clearTimeout(expiryTimer);
+  if (!value) return;
+  const remaining = value.expires_at * 1000 - Date.now();
+  if (remaining <= 0) { proposal = null; return; }
   const slip = el("aside", "slip");
-  slip.dataset.proposal = "1";
+  slip.dataset.proposal = value.id;
   const stub = el("div", "stub");
-  stub.appendChild(el("span", "stub-qty", String(proposal.quantity)));
-  stub.appendChild(el("span", "stub-unit", "шт"));
+  stub.append(el("span", "stub-qty", String(value.items.length)), el("span", "stub-unit", "поз."));
   const body = el("div", "slip-body");
-  body.appendChild(el("p", "slip-kicker", "К отгрузке"));
-  body.appendChild(el("h2", null, proposal.name));
-  body.appendChild(el("p", "article", proposal.article || ""));
-  body.appendChild(
-    el(
-      "p",
-      null,
-      `${proposal.price_label || money(proposal.unit_price)} × ${proposal.quantity} = ${proposal.total_label || money(proposal.line_total)}`
-    )
-  );
-  body.appendChild(el("p", "article", `в снимке ${proposal.stock} шт`));
+  body.append(el("h2", null, "Добавить в корзину?"));
+  for (const item of value.items) {
+    body.append(el("p", null, item.name), el("p", "article",
+      item.article + " · " + item.quantity + " " + item.unit + " × " + item.price_label + " = " + item.total_label));
+  }
+  body.append(el("p", "proposal-total", "Итого " + value.total_label));
   const actions = el("div", "actions");
-  const cancel = el("button", "ghost", "Не добавлять");
-  const confirm = el("button", "primary", "Добавить в корзину");
-  cancel.type = "button";
-  confirm.type = "button";
-  cancel.addEventListener("click", async () => {
-    const res = await fetch("/api/cart/cancel", { method: "POST" });
-    const data = await res.json();
-    updateCart(data.cart);
-    slip.remove();
-  });
-  confirm.addEventListener("click", async () => {
-    confirm.disabled = true;
-    const res = await fetch("/api/cart/confirm", { method: "POST" });
-    const data = await res.json();
-    if (!res.ok) {
-      showStatus(data.error || "Не удалось добавить");
-      confirm.disabled = false;
-      return;
-    }
-    updateCart(data.cart);
-    slip.remove();
-    renderAdded(data.cart);
-  });
-  actions.append(cancel, confirm);
-  body.appendChild(actions);
+  for (const [name, label, className] of [["confirm", "Подтвердить добавление", "primary"], ["cancel", "Не добавлять", "ghost"]]) {
+    const button = el("button", className, label);
+    button.type = "button";
+    button.addEventListener("click", () => changeCart(name, value.id));
+    actions.append(button);
+  }
+  body.append(actions, el("p", "article", "Можно ответить в чате: «да, добавь»."));
   slip.append(stub, body);
-  addNode(slip);
+  log.append(slip);
+  expiryTimer = setTimeout(() => {
+    slip.remove();
+    if (proposal?.id === value.id) proposal = null;
+    showStatus("Предложение истекло. Попросите подготовить его снова.");
+  }, remaining);
 }
 
-function renderAdded(cart) {
-  const box = el("div", "added");
-  const line = el("p");
-  line.append(`В корзине ${cart.count} шт на ${cart.total_label}. `);
-  const link = el("a", null, "Открыть корзину");
-  link.href = "/cart";
-  line.appendChild(link);
-  box.appendChild(line);
-  addNode(box);
+function renderState(data) {
+  currentState = { ...currentState, ...data };
+  if (["added", "already_added", "cancelled"].includes(data.status)) draftQuantities.clear();
+  for (const item of currentState.proposal?.items || []) {
+    if (!draftQuantities.has(item.product_id)) draftQuantities.set(item.product_id, String(item.quantity));
+  }
+  if (data.csrf_token) csrf = data.csrf_token;
+  cartCount.textContent = String(currentState.cart?.count || 0);
+  log.replaceChildren();
+  if (!currentState.history?.length) log.append(welcome);
+  for (const item of currentState.history || []) bubble(item.role, item.content);
+  renderConsultation(currentState);
+  renderHits(currentState.products);
+  renderProposal(currentState.proposal);
+  if (["added", "already_added"].includes(data.status)) {
+    const added = el("div", "added", "В корзине: " + currentState.cart.total_label + ". ");
+    const link = el("a", null, "Открыть корзину");
+    link.href = "/cart";
+    added.append(link);
+    log.append(added);
+  }
+  setBusy(busy);
+  log.scrollTop = log.scrollHeight;
 }
 
-function renderAssistant(text) {
-  if (!text) return;
-  const box = el("article", "bubble");
-  box.appendChild(el("p", "meta-line", "Консультант"));
-  box.appendChild(el("p", null, text));
-  addNode(box);
+function renderConsultation(state) {
+  const sources = el("div", "consultation-sources");
+  for (const source of state.sources || []) {
+    const link = safeLink(source.title || "Источник", source.url);
+    if (link) sources.append(link);
+  }
+  if (sources.childNodes.length) log.append(sources);
+  if (state.snapshot?.indexed_at) {
+    const stamp = new Date(state.snapshot.indexed_at).toLocaleString("ru-RU");
+    log.append(el("p", "article snapshot-note", "Каталог собран " + stamp + ". Дата обновления остатков поставщиком не подтверждена."));
+  }
+  for (const issue of state.attachment_issues || []) log.append(el("p", "attachment-issue", issue));
+  if (!state.attachment_review?.length) return;
+  const review = el("section", "spec-review");
+  review.append(el("h2", null, "Разбор спецификации"), el("p", "article", "Выберите позиции и проверьте количество. До 50 строк в одном предложении."));
+  const choices = [];
+  const labels = { resolved: "Найден по артикулу", ambiguous: "Выберите совпадение", unresolved: "Не найден — уточните в чате", quantity_required: "Укажите количество" };
+  state.attachment_review.forEach((item, index) => {
+    const row = el("div", "spec-row");
+    row.append(el("p", "article", item.filename + " · " + item.source_reference),
+      el("p", null, item.query || "Нечитаемая строка"), el("p", "article", labels[item.status] || item.status));
+    if (item.candidates?.length) {
+      const include = el("input"); include.type = "checkbox";
+      include.setAttribute("aria-label", "Выбрать строку " + (index + 1));
+      const select = el("select"); select.setAttribute("aria-label", "Товар для строки " + (index + 1));
+      select.append(new Option("Выберите товар", ""));
+      for (const product of item.candidates) {
+        const option = new Option((product.article || product.id) + " · " + product.name, String(product.id));
+        option.disabled = product.quantity == null || product.quantity <= 0 || product.price == null;
+        select.append(option);
+      }
+      if (item.status === "resolved" && !select.options[1].disabled) select.value = String(item.candidates[0].id);
+      const quantity = el("input", "quantity-input");
+      quantity.type = "number"; quantity.min = "0.000001"; quantity.step = "any";
+      quantity.value = item.quantity == null ? "" : String(item.quantity);
+      quantity.setAttribute("aria-label", "Количество для строки " + (index + 1));
+      const controls = el("div", "spec-controls");
+      const includeLabel = el("label", "spec-choice", "Выбрать "); includeLabel.prepend(include);
+      controls.append(includeLabel, select, quantity); row.append(controls);
+      choices.push({ include, select, quantity });
+    }
+    review.append(row);
+  });
+  const prepare = el("button", "primary", "Подготовить выбранные"); prepare.type = "button";
+  prepare.addEventListener("click", async () => {
+    if (busy) return;
+    const selected = choices.filter(c => c.include.checked);
+    if (!selected.length || selected.length > 50) { showStatus("Выберите от 1 до 50 строк."); return; }
+    if (selected.some(c => !c.select.value || !c.quantity.value || !c.quantity.checkValidity())) {
+      showStatus("Выберите товар и положительное количество для каждой выбранной строки."); return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch("/api/cart/propose-items", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+        body: JSON.stringify({ items: selected.map(c => ({ product_id: Number(c.select.value), quantity: c.quantity.value })) })
+      });
+      const data = await res.json();
+      if (data.cart) renderState(data);
+      showStatus(res.ok ? "" : data.error || "Не удалось подготовить выбор. Проверьте количество.");
+    } catch { showStatus("Нет связи. Попробуйте ещё раз."); }
+    finally { setBusy(false); }
+  });
+  review.append(prepare); log.append(review);
+}
+
+async function changeCart(action, id) {
+  if (busy) return;
+  setBusy(true);
+  showStatus("");
+  try {
+    const res = await fetch("/api/cart/" + action, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+      body: JSON.stringify({ proposal_id: id })
+    });
+    const data = await res.json();
+    if (data.cart) renderState(data);
+    if (!res.ok) showStatus(data.error || "Не удалось изменить корзину.");
+  } catch { showStatus("Нет связи. Повторите действие: товар не добавится дважды."); }
+  finally { setBusy(false); }
 }
 
 function renderFiles() {
-  chips.innerHTML = "";
-  if (!files.length) {
-    chips.hidden = true;
-    return;
-  }
-  chips.hidden = false;
-  for (const file of files) {
-    chips.appendChild(el("li", null, file.name));
-  }
+  chips.replaceChildren();
+  chips.hidden = !files.length;
+  files.forEach((file, index) => {
+    const li = el("li", null, file.name + " ");
+    const remove = el("button", "remove-file", "Убрать");
+    remove.type = "button";
+    remove.addEventListener("click", () => { files.splice(index, 1); renderFiles(); });
+    li.append(remove);
+    chips.append(li);
+  });
 }
-
 attachBtn.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", () => {
-  files = Array.from(fileInput.files || []);
+  const selected = Array.from(fileInput.files || []);
+  const next = [...files, ...selected];
+  fileInput.value = "";
+  if (next.length > 5 || next.some(f => f.size > 10 * 1024 * 1024) || next.reduce((n, f) => n + f.size, 0) > 20 * 1024 * 1024) {
+    showStatus("До 5 файлов: 10 МБ на файл, 20 МБ суммарно.");
+    return;
+  }
+  files = next;
+  showStatus("");
   renderFiles();
 });
-
 input.addEventListener("input", () => {
   input.style.height = "auto";
-  input.style.height = `${Math.min(input.scrollHeight, 128)}px`;
+  input.style.height = Math.min(input.scrollHeight, 128) + "px";
 });
-
-input.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
-    event.preventDefault();
-    form.requestSubmit();
-  }
+input.addEventListener("keydown", event => {
+  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); }
 });
-
-form.addEventListener("submit", async (event) => {
+form.addEventListener("submit", async event => {
   event.preventDefault();
+  if (busy) return;
   const text = input.value.trim();
   if (!text && !files.length) return;
-  showStatus("");
-  renderUser(text, files.map((file) => file.name));
   const body = new FormData();
   body.append("message", text);
+  body.append("proposal_id", proposal?.id || "");
   for (const file of files) body.append("files", file);
-  input.value = "";
-  input.style.height = "auto";
-  files = [];
-  fileInput.value = "";
-  renderFiles();
-  sendBtn.disabled = true;
-  showStatus("Ищем в каталоге…");
+  setBusy(true);
+  input.blur();
+  showStatus("");
+  welcome.remove();
+  bubble("user", text || "Посмотрите вложение.");
+  const pending = bubble("assistant", "Ищем ответ…");
+  pending.classList.add("pending-reply");
+  pending.scrollIntoView({ block: "end" });
+  announcement.textContent = "Ищем ответ…";
   try {
-    const res = await fetch("/api/chat", { method: "POST", body });
+    const res = await fetch("/api/chat", { method: "POST", headers: { "X-CSRF-Token": csrf }, body });
     const data = await res.json();
     if (!res.ok) {
-      showStatus(data.error || "Ошибка запроса");
+      renderState(currentState);
+      showStatus(data.error || data.detail || "Не удалось получить ответ.");
       return;
     }
-    showStatus("");
-    updateCart(data.cart);
-    renderHits(data.products);
-    renderAssistant(data.text);
-    renderProposal(data.proposal);
-  } catch (err) {
-    showStatus("Нет связи с сервером");
-  } finally {
-    sendBtn.disabled = false;
-    input.focus();
+    input.value = "";
+    input.style.height = "auto";
+    files = [];
+    fileInput.value = "";
+    renderFiles();
+    renderState(data);
+    announcement.textContent = data.text || "Ответ готов.";
+    showStatus(data.ok === false ? data.error : "");
+  } catch {
+    renderState(currentState);
+    showStatus("Нет связи с сервером. Сообщение сохранено в поле ввода.");
   }
+  finally { setBusy(false); }
 });
 
 async function boot() {
-  const res = await fetch("/api/state");
-  const data = await res.json();
-  updateCart(data.cart);
-  if (data.proposal) renderProposal(data.proposal);
+  setBusy(true);
+  try {
+    const res = await fetch("/api/state");
+    if (!res.ok) throw new Error();
+    renderState(await res.json());
+    setBusy(false);
+  } catch { showStatus("Не удалось загрузить чат. Обновите страницу."); }
 }
-
 boot();
