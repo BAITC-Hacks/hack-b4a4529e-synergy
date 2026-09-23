@@ -4,12 +4,12 @@
 
 - **Задача:** помочь покупателю найти электротовары по артикулу или описанию, сравнить аналоги и разобрать спецификацию. Цены и остатки показаны из проверяемого снимка каталога EKT, а неподтверждённые условия продажи не выдумываются.
 - **Технологии:** Python 3.12, FastAPI и Uvicorn; HTML, CSS и JavaScript без фронтенд-фреймворка; OpenAI API для диалога и эмбеддингов; NumPy для поиска, SQLite для кеша эмбеддингов. Источник товаров — API EKT.
-- **Запуск:** установите зависимости, скачайте подготовленные данные с Kaggle и распакуйте их в `data/`, укажите `OPENAI_API_KEY` в `.env` и запустите сервер. Инструкция — в разделе [Run with prepared Kaggle data](#run-with-prepared-kaggle-data). Для этого пути не нужны доступ к API EKT и повторное построение эмбеддингов.
+- **Запуск:** установите зависимости, скачайте подготовленные данные с Kaggle и скопируйте папку `data` в корень проекта, объединив её с существующей папкой. Укажите `OPENAI_API_KEY` в `.env` и запустите сервер. Инструкция — в разделе [Run with prepared Kaggle data](#run-with-prepared-kaggle-data). Для этого пути не нужны доступ к API EKT и повторное построение эмбеддингов.
 - **Проверка:** без ключей выполните команды из [Reviewer quick start](#reviewer-quick-start); при наличии Node.js дополнительно запустите `node --test tests/frontend_workflows.cjs`. Для проверки уже подготовленного приложения откройте `http://localhost:8000`, найдите артикул `151100015_` и проверьте `/api/ready`.
 
-В текущем снимке EKT нет подтверждённых минимальной партии и шага покупки, поэтому добавление реальных товаров в корзину заблокировано. Логику подтверждения корзины проверяют автоматические тесты с синтетическими товарами.
+В текущем снимке EKT нет подтверждённых минимальной партии и шага покупки. Товары с ценой и положительным остатком можно добавить в предварительную корзину; условия продажи нужно уточнить у поставщика.
 
-A Russian-language shopping assistant for the [ekt.kz](https://ekt.kz) catalog. It searches a downloaded catalog by article or description and shows product details and stock from that snapshot. Products with confirmed purchase rules can be prepared for a local cart, and adding them always requires explicit confirmation. This is a hackathon prototype; it does not place an order or reserve stock.
+A Russian-language shopping assistant for the [ekt.kz](https://ekt.kz) catalog. It searches a downloaded catalog by article or description and shows product details and stock from that snapshot. Products with a known price and positive warehouse stock can be prepared for a local cart, and adding them always requires explicit confirmation. This is a hackathon prototype; it does not place an order or reserve stock.
 
 The app uses a snapshot because semantic search needs a prebuilt embedding index for the catalog. It calls the EKT API when downloading or refreshing data, not for each chat request. This makes searches independent of EKT API availability during a demo, but prices and stock can become stale.
 
@@ -31,7 +31,11 @@ To try the live UI with the prepared Kaggle data, you need an OpenAI API key for
 
 ## Run with prepared Kaggle data
 
-The prepared Kaggle package contains exactly two files: the current catalog CSV and one file with the saved embeddings plus matching product records for 15,037 products. **Kaggle dataset link: add after upload.** Download the password-protected archive, obtain its password from the submission, and extract its `data/` directory into the repository root. The repository already contains the empty `data/` directory; keep it and place the downloaded files inside it. Check that these files exist:
+The prepared Kaggle data contains exactly two files: the catalog CSV and one bundle with saved embeddings and matching product records for 15,037 products. Download it from the [Kaggle dataset](https://kaggle.com/datasets/0b00e052ecd76da9facf9b97c354efebadfe611689523fbf5f0b6ac5229067f8).
+
+1. Sign in to Kaggle, download the dataset, and unzip it. No password is required.
+2. Copy the extracted `data` folder into the repository root, beside `README.md`. Merge it with the existing `data` folder; do not delete that folder or create `data/data`.
+3. Check that these two files exist:
 
 ```text
 data/ekt/products.csv
@@ -68,13 +72,13 @@ The downloader resumes interrupted raw-response downloads. Existing CSV rows do 
 2. With a prepared catalog and API key, search for article `151100015_` or ask for “Автоматический выключатель 16 А”. Open a product card to inspect its source, price, stock and technical details.
 3. Try **Показать аналоги** or ask about delivery terms. The assistant should distinguish known facts from information that needs supplier confirmation.
 
-The current 15,037-product EKT snapshot has no confirmed minimum quantity or purchase increment for any product. Selection and cart addition are therefore blocked in the live catalog; the app shows the missing rule instead of guessing it. The cart flow is covered by tests using clearly synthetic products with confirmed rules. A new EKT snapshot will enable live selection only if those fields become available.
+The current 15,037-product EKT snapshot has no confirmed minimum quantity or purchase increment for any product. Products with a known price and positive warehouse stock can still be added to a provisional cart. The app shows which supplier terms remain unconfirmed; confirmed terms are enforced when available.
 
-Exact article matches avoid an embedding call. Natural-language searches use the local embedding index. When purchase rules are confirmed, the model can prepare a proposal, but only the server's confirmation handler changes the cart. A proposal expires after 10 minutes; prices and quantities are checked again on confirmation.
+Exact article matches avoid an embedding call. Natural-language searches use the local embedding index. The model can prepare a proposal for an in-stock product, but only the server's confirmation handler changes the cart. A proposal expires after 10 minutes; prices and quantities are checked again on confirmation.
 
 The product card's quantity control uses server-calculated minimum, multiple, and remaining stock. Missing requested technical specifications are marked for clarification. Monetary API values are decimal strings; the displayed price and totals come from server-formatted labels.
 
-Adding a product requires a confirmed selling unit and explicit positive minimum quantity and purchase increment. Unknown units are displayed as “единица продажи не подтверждена”. A metre-based selling unit does not authorize arbitrary cut lengths. Missing terms block selection, proposals, confirmation and quantity edits on the server; products remain searchable. `KRATNOST_MIN`, `KRATNOST_MAKS`, package lengths and numbers in names are not substitutes for documented purchase rules. The current API archive does not contain unambiguous minimum/increment fields, so its products require supplier clarification before adding. Confirmed terms must come from catalog ingestion, not chat assertions or browser parameters.
+Adding a product requires a known price and positive warehouse stock. Missing purchase terms do not block the provisional cart; any confirmed minimum quantity or purchase increment is enforced. Unknown selling units are shown as catalog units, without claiming a supplier-confirmed unit. A metre-based selling unit does not prove that the supplier offers any particular cut length. `KRATNOST_MIN`, `KRATNOST_MAKS`, package lengths and numbers in names are not substitutes for documented purchase rules. Confirmed terms must come from catalog ingestion, not chat assertions or browser parameters.
 
 ### Everyday chat controls
 

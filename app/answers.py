@@ -24,18 +24,12 @@ def clarification_answer(message, products, model_text=""):
             return question
     return "Что важнее при выборе: цена, наличие в вашем городе или конкретная марка?"
 
-from .cart import purchase_rule_issue
-
 
 def catalog_answer(message, products):
     exact = [p for p in products if p.get("exact_match") and not p.get("analog_of")]
     lines = ["Нашёл точное совпадение. Укажите количество и добавьте товар в выбор." if len(exact) == 1
              else "Нашёл несколько вариантов. Выберите подходящие товары." if len(products) > 1
              else "Нашёл товар. Проверьте характеристики и укажите количество."]
-    if products and all(purchase_rule_issue(p) for p in products):
-        lines = ["Нашёл товары по запросу. До добавления нужно подтвердить единицы продажи, минимальные партии и кратность у поставщика."]
-        if len(products) == 1:
-            lines = ["Нашёл точное совпадение." if exact else "Нашёл товар.", purchase_rule_issue(products[0])]
     if re.search(r"поставщик|поступлен", message, re.I):
         for product in products[:3]:
             supplier = product.get("supplier_availability")

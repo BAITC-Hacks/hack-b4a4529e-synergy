@@ -315,18 +315,19 @@ function renderProduct(item) {
   body.append(alternatives);
   const summary = el("div", "hit-summary");
   const price = el("span", "price-group");
-  const unitLabel = item.unit_known === true ? item.unit : "уточните единицу продажи";
+  const unitLabel = item.unit_known === true ? item.unit : "ед. каталога";
   price.append(el("strong", "hit-price", item.price_label || money(item.price)),
-    el("span", "price-unit", item.unit_known === true ? " / " + unitLabel : " · " + unitLabel));
+    el("span", "price-unit", " / " + unitLabel));
   summary.append(price);
   const options = item.purchase_options || { can_add: false, reason: "Обновите страницу для проверки количества." };
-  const stock = item.quantity == null || (item.quantity > 0 && item.unit_known !== true) ? "Наличие уточняйте" : item.quantity <= 0 ? "Нет в наличии"
+  const stock = item.quantity == null ? "Наличие уточняйте" : item.quantity <= 0 ? "Нет в наличии"
     : "В наличии: " + Number(item.quantity).toLocaleString("ru-RU", { maximumFractionDigits: 6 })
       + " " + unitLabel;
   summary.append(el("span", item.quantity === 0 ? "stock out" : "stock", stock));
   body.append(summary);
   if (item.min_quantity) body.append(el("p", "article", "Минимальная партия: " + item.min_quantity + " " + unitLabel));
   if (item.quantity_step) body.append(el("p", "article", "Кратность: " + item.quantity_step + " " + unitLabel));
+  if (item.purchase_rule_note) body.append(el("p", "cart-limit", "Условия продажи уточняйте у поставщика; количество в корзине предварительное."));
   for (const length of item.lengths || []) body.append(el("p", "article", (length.label || "Длина") + ": " + (length.raw_value ?? (length.metres != null ? length.metres + " м" : "неизвестна")) + " · не является количеством упаковок"));
   const meta = el("div", "hit-meta");
   const details = el("details", "product-details");
@@ -352,7 +353,7 @@ function renderProduct(item) {
   if (item.unverified_specs?.length) {
     body.append(el("p", "cart-limit", "Уточните характеристики: " + item.unverified_specs.join(", ") + "."));
   }
-  if (options.can_add && item.unit_known === true && item.purchase_rules_confirmed === true && !item.unverified_specs?.length) {
+  if (options.can_add) {
     const controls = el("div", "hit-actions");
     if (Number(options.existing)) controls.append(el("p", "in-cart", "В корзине: " + Number(options.existing).toLocaleString("ru-RU", { maximumFractionDigits: 6 }) + " " + (item.unit || "ед.")));
     const label = el("label", "quantity-label");
@@ -360,7 +361,7 @@ function renderProduct(item) {
     const quantity = el("input", "quantity-input");
     quantity.type = "number";
     quantity.inputMode = "decimal";
-    quantity.min = options.suggested_quantity;
+    quantity.min = options.step === "any" ? (item.min_quantity || "0.000001") : options.suggested_quantity;
     quantity.step = options.step;
     quantity.value = draftQuantities.get(item.id) || options.suggested_quantity;
     quantity.max = options.remaining;
@@ -399,7 +400,7 @@ function renderProduct(item) {
   } else {
     if (item.image) row.append(thumb);
     row.append(body);
-    if (!item.unverified_specs?.length && !(item.quantity != null && Number(item.quantity) <= 0))
+    if (!(item.quantity != null && Number(item.quantity) <= 0))
       body.append(el("p", "cart-limit", options.reason || "Уточните условия покупки у поставщика."));
   }
   return row;
@@ -615,7 +616,7 @@ function renderReview(state) {
     const include=el("input");include.type="checkbox";include.checked=draft.checked;include.setAttribute("aria-label","Выбрать: "+item.source_reference);
     const select=el("select");select.setAttribute("aria-label","Товар: "+item.source_reference);select.append(new Option("Выберите товар",""));
     for(const product of item.candidates){
-      const option=new Option(`${product.article||product.id} · ${product.name} · ${product.price_label||"цена неизвестна"} / ${product.unit_known ? product.unit : "единицу уточните"} · ${product.quantity == null || !product.unit_known ? "наличие уточняйте" : "в наличии " + product.quantity}`,String(product.id));
+      const option=new Option(`${product.article||product.id} · ${product.name} · ${product.price_label||"цена неизвестна"} / ${product.unit_known ? product.unit : "ед. каталога"} · ${product.quantity == null ? "наличие уточняйте" : "в наличии " + product.quantity}`,String(product.id));
       select.append(option);
     }
     select.value=draft.product;
@@ -629,7 +630,7 @@ function renderReview(state) {
       const product=item.candidates.find(p=>p.id===Number(select.value));detail.replaceChildren();
       if(product){
         const options=product.purchase_options;
-        detail.append(el("p","article",`Единица продажи: ${product.unit_known ? product.unit : "уточняйте"}. ${product.quantity == null || !product.unit_known ? "Наличие уточняйте" : "В наличии: " + product.quantity}.`));
+        detail.append(el("p","article",`Единица продажи: ${product.unit_known ? product.unit : "не подтверждена (ед. каталога)"}. ${product.quantity == null ? "Наличие уточняйте" : "В наличии: " + product.quantity}.`));
         if(options && !options.can_add)detail.append(el("p","field-error",options.reason));
         if(!item.source_unit)detail.append(el("p","field-error","Укажите единицу измерения из документа."));
         if(item.source_unit && Workflow.unit(item.source_unit)!==Workflow.unit(product.unit))detail.append(el("p","field-error","Единицы различаются. Уточните единицу; автоматического пересчёта нет."));
@@ -926,7 +927,7 @@ document.getElementById("compare-products").addEventListener("click", async () =
     const table=el("table","comparison-table");const caption=el("caption","sr-only","Сравнение выбранных товаров");table.append(caption);
     const head=el("tr");head.append(el("th",null,"Параметр"));for(const product of data.products)head.append(el("th",null,product.name));table.append(head);
     const attributes=[{name:"Артикул",values:data.products.map(p=>p.article)},{name:"Цена",values:data.products.map(p=>p.price_label)},
-      {name:"Единица продажи",values:data.products.map(p=>p.unit_known ? p.unit : "Уточняйте")},{name:"Наличие",values:data.products.map(p=>p.unit_known ? p.quantity??"Уточняйте" : "Уточняйте")},...data.attributes];
+      {name:"Единица продажи",values:data.products.map(p=>p.unit_known ? p.unit : "Уточняйте")},{name:"Наличие",values:data.products.map(p=>p.quantity??"Уточняйте")},...data.attributes];
     for(const attribute of attributes){const row=el("tr");const label=el("th",null,attribute.name);label.scope="row";row.append(label);for(const value of attribute.values)row.append(el("td",null,String(value)));table.append(row);}
     const scroll=el("div","comparison-scroll");scroll.tabIndex=0;scroll.setAttribute("role","region");scroll.setAttribute("aria-label","Таблица сравнения, прокрутка по горизонтали");scroll.append(table);content.append(scroll);
   }catch(error){content.replaceChildren(el("p",null,error.message||"Не удалось загрузить сравнение."));}

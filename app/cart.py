@@ -125,7 +125,7 @@ def cart_view(session: Session) -> dict:
 
 
 def purchase_rule_issue(product: dict) -> str:
-    """Missing commercial terms must never become implicit units or increments."""
+    """Describe unconfirmed supplier terms without treating them as a cart blocker."""
     missing = []
     unit = str(product.get("unit") or "").strip()
     if product.get("unit_known") is not True or not unit or unit == "ед." or "\ufffd" in unit:
@@ -138,8 +138,16 @@ def purchase_rule_issue(product: dict) -> str:
         if not valid:
             missing.append(label)
     if missing:
-        return "Чтобы добавить товар, уточните у поставщика: " + ", ".join(missing) + "."
+        return "У поставщика не подтверждены: " + ", ".join(missing) + ". Количество в корзине предварительное."
     return ""
+
+
+def confirmed_positive(value) -> Decimal | None:
+    try:
+        amount = number(value)
+    except ValueError:
+        return None
+    return amount if amount > 0 else None
 
 
 def purchase_options(session: Session, product: dict) -> dict:
@@ -152,12 +160,11 @@ def purchase_options(session: Session, product: dict) -> dict:
     remaining = max(Decimal(0), stock - existing)
     if stock <= 0:
         return {"can_add": False, "reason": "Нет в наличии."}
-    if issue := purchase_rule_issue(product):
-        return {"can_add": False, "reason": issue}
-    increment = number(product["quantity_step"])
-    minimum = number(product["min_quantity"])
-    needed = max(Decimal(0), minimum - existing)
-    suggested = max(increment, (needed / increment).to_integral_value(rounding=ROUND_CEILING) * increment)
+    increment = confirmed_positive(product.get("quantity_step"))
+    minimum = confirmed_positive(product.get("min_quantity"))
+    needed = max(Decimal(0), (minimum or Decimal(0)) - existing)
+    suggested = (max(increment, (needed / increment).to_integral_value(rounding=ROUND_CEILING) * increment)
+                 if increment else max(needed, min(Decimal(1), remaining)))
     can_add = remaining > 0 and suggested <= remaining
     if can_add:
         reason = ""
@@ -166,7 +173,7 @@ def purchase_options(session: Session, product: dict) -> dict:
     else:
         reason = "Остатка недостаточно для минимального количества или кратности."
     return {"can_add": can_add, "reason": reason, "existing": str(existing), "remaining": str(remaining),
-            "suggested_quantity": str(suggested), "step": str(increment),
+            "suggested_quantity": str(suggested), "step": str(increment) if increment else "any",
             "unit": unit}
 
 
@@ -185,18 +192,16 @@ def _err(message: str, **extra) -> dict:
 def _line(session: Session, product: dict | None, quantity) -> CartLine:
     if not product:
         raise ValueError("товар не найден в каталоге")
-    if issue := purchase_rule_issue(product):
-        raise ValueError(issue)
     qty = number(quantity)
     if qty <= 0 or qty > Decimal("1000000000") or qty.normalize().as_tuple().exponent < -6:
         raise ValueError("укажите положительное количество (не более 6 знаков после запятой)")
     unit = product.get("unit") or "ед."
-    step = number(product["quantity_step"])
-    minimum = number(product["min_quantity"])
-    if qty % step:
+    step = confirmed_positive(product.get("quantity_step"))
+    minimum = confirmed_positive(product.get("min_quantity"))
+    if step and qty % step:
         raise ValueError(f"количество должно быть кратно {step}")
     existing = sum((x.quantity for x in session.cart if x.product_id == product["id"]), Decimal(0))
-    if qty + existing < minimum:
+    if minimum and qty + existing < minimum:
         raise ValueError(f"минимальное количество: {minimum} {unit}")
     if product.get("quantity") is None:
         raise ValueError("остаток неизвестен; добавить нельзя")
