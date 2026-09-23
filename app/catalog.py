@@ -253,7 +253,7 @@ def supplier_fields(properties):
             "lead_time_hours": _as_number(match[1]) if match else None,
             "quantity_raw": deepcopy(properties.get(quantity_key)), "lead_time_raw": deepcopy(raw_time),
             "quantity_source": "properties." + quantity_key, "lead_time_source": "properties." + time_key,
-            "note": "Остаток у поставщика не входит в доступный остаток каталога. Срок поступления не является сроком доставки клиенту."}
+            "note": "Наличие у поставщика указано отдельно. Срок поступления к поставщику не означает срок доставки вам."}
 
 
 def spec_snippet(record: dict, limit: int = 280) -> str:

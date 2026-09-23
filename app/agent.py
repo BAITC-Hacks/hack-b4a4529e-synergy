@@ -26,12 +26,12 @@ from .answers import clarification_answer
 IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 DOC_EXTS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv"}
 
-SYSTEM = """Вы консультант каталога Электрокомплект. Отвечайте кратко по-русски.
-Пишите простым текстом, без Markdown. Единицы берите из поля unit только при unit_known=true; иначе единица продажи не подтверждена.
+SYSTEM = """Вы консультант каталога электротоваров. Отвечайте кратко по-русски.
+Пишите простым текстом, без Markdown. Единицы берите из поля unit только при unit_known=true; иначе попросите уточнить единицу продажи у поставщика. Не упоминайте внутренние поля, снимки каталога, сервер или сессии.
 При purchase_rules_confirmed=false объясните purchase_rule_note. Не предлагайте добавление и не обещайте отрез произвольной длины без подтверждённых правил покупки.
 Когда карточка товара уже показана, дайте краткий вывод без повторения артикула, цены и остатка.
 Используйте search_products для поиска и get_product для характеристик. Цены, остатки,
-артикулы и сведения о товарах берите только из инструментов. Это снимок каталога.
+артикулы и сведения о товарах берите только из инструментов. Эти сведения могут устареть.
 При неизвестном остатке или цене не предлагайте покупку. Аналог — кандидат, различия нужно проверить.
 Если клиент хочет добавить товары, уточните количество и вызовите propose_cart.
 Этот инструмент только готовит предложение. Система сама спросит подтверждение.
@@ -49,7 +49,7 @@ SYSTEM = """Вы консультант каталога Электрокомп�
 Не пропускайте нераспознанные строки, используйте пустое описание для нечитаемых строк и поясните ограничение.
 Разбирайте до 100 строк за вызов; при невозможности обработать всё попросите разделить документ.
 При вложениях сначала покажите разбор и попросите выбрать позиции; не вызывайте propose_cart в этот ход.
-Для неоднозначных совпадений и неизвестных количеств задайте уточняющий вопрос. Ничего не считайте выбранным автоматически.
+Для неоднозначных совпадений и неизвестных количеств задайте уточняющий вопрос. Ничего не считайте выбранным автоматически. Для позиций из разбора в propose_cart передавайте source_id равный row_id; для ручного выбора source_id=null. Не добавляйте уже завершённые строки повторно без отдельного запроса пользователя.
 """
 
 
@@ -75,8 +75,8 @@ TOOLS = [
     tool("get_alternatives", "Аналоги выбранного товара, включая товар в наличии", {"product_id": {"type": "integer"}}),
     tool("propose_cart", "Подготовить выбранные товары для подтверждения. Корзину НЕ изменяет.",
          {"items": {"type": "array", "minItems": 1, "maxItems": 50, "items": {
-             "type": "object", "properties": {"product_id": {"type": "integer"}, "quantity": {"type": "number"}},
-             "required": ["product_id", "quantity"], "additionalProperties": False}}}),
+             "type": "object", "properties": {"product_id": {"type": "integer"}, "quantity": {"type": "number"}, "source_id": {"type": ["string", "null"]}},
+             "required": ["product_id", "quantity", "source_id"], "additionalProperties": False}}}),
 ]
 
 
@@ -221,7 +221,7 @@ def run_turn(session, message: str, files: list[dict] | None = None, proposal_id
         session.last_search = []
         session.sources = []
         session.snapshot = index.metadata
-        text = "Указанный артикул в снимке каталога не найден. Проверьте артикул или пришлите название и характеристики."
+        text = "Товар с таким артикулом не найден. Проверьте артикул или пришлите название и характеристики."
         remember(session, message, text)
         return {**state_payload(session), "text": text}
     if (not files and re.fullmatch(r"[0-9a-zа-яё._-]{3,}", message.strip(), re.I)
@@ -267,7 +267,7 @@ def run_turn(session, message: str, files: list[dict] | None = None, proposal_id
     if files:
         session.pending = None
         session.attachment_issues = list(dict.fromkeys(w for f in files for w in f.get("warnings", [])))
-        session.attachment_issues.append("Для фото, PDF и Word полнота распознавания не подтверждена автоматически. Сверьте строки с оригиналом; файлы таблиц сверяются построчно.")
+        session.attachment_issues.append("Проверьте, что все строки с фото, PDF или Word найдены верно. Таблицы сверяются построчно.")
     try:
         for _ in range(MAX_TOOL_ROUNDS):
             if session.cancel_event.is_set():
@@ -341,20 +341,21 @@ def run_turn(session, message: str, files: list[dict] | None = None, proposal_id
         session.last_search = (list(turn_products.values()) if files else
                                constrain_results(message, list(turn_products.values()), index=index))
         if not session.last_search:
-            text = "По запросу ничего не найдено. Уточните артикул или название."
+            text = ("Подходящих товаров не найдено. "
+                    "Если у вас есть артикул, пришлите его; наличие товара можно уточнить у поставщика.")
         elif missing := sorted({spec for product in session.last_search
                                 for spec in product.get("unverified_specs", [])}):
             if any(not product.get("unverified_specs") for product in session.last_search):
                 text = "Сравните найденные товары. Варианты, для которых не хватает характеристик, показаны отдельно."
             else:
-                text = ("Точное соответствие не подтверждено. Недостаточно данных: " + ", ".join(missing)
+                text = ("Не могу подтвердить точное совпадение. Уточните характеристики: " + ", ".join(missing)
                         + ". Проверьте данные у поставщика или уточните артикул.")
         elif needs_clarification:
             text = question
         else:
             text = catalog_answer(message, session.last_search)
-            if question and question != clarification_answer(message, session.last_search, ""):
-                text += "\n" + question
+        if session.last_search and question and question not in text and (needs_clarification or question != clarification_answer(message, session.last_search, "")):
+            text += "\n" + question
     if purchase_terms and not propose_attempted:
         text = (text + "\n\n" if catalog_attempted else "") + terms_answer(purchase_terms)
     remembered = message or "Посмотрите вложение."

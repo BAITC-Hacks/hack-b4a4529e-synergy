@@ -124,7 +124,8 @@ def test_empty_search_replaces_previous_cards(monkeypatch):
     session = Session(id="test", last_search=[{"id": 101, "name": "old"}])
     result = run_turn(session, "Найди неизвестный товар")
     assert result["products"] == []
-    assert "ничего не найдено" in result["text"]
+    assert "Подходящих товаров не найдено" in result["text"]
+    assert "Уточните артикул или название" not in result["text"]
 
 
 def test_broader_tool_queries_cannot_relax_customer_cable_requirements(monkeypatch):

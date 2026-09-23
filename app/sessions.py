@@ -49,7 +49,9 @@ def state_payload(session: Session) -> dict:
                 "products": [{**product, "purchase_options": purchase_options(session, product)}
                              for product in session.last_search],
                 "sources": list(session.sources), "snapshot": dict(session.snapshot),
-                "attachment_review": list(session.attachment_review),
+                "attachment_review": [{**deepcopy(row), "candidates": [
+                    {**product, "purchase_options": purchase_options(session, product)} for product in row["candidates"]
+                ]} for row in session.attachment_review],
                 "attachment_issues": list(session.attachment_issues)}
 
 

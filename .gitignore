@@ -26,8 +26,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Local catalog dump
-data/
+# Local catalog dump; keep the empty data directory in Git
+data/*
+!data/.gitkeep
 
 
 docs/

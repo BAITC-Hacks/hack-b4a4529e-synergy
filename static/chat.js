@@ -20,8 +20,11 @@ const retiredChats = new Set();
 let localSelectionInputs = null;
 let recoveredRequest = null;
 let recoveryTimer;
+let submittedDraft = null;
 let browseResults = null;
 let browseQuery = "";
+let browsePending = false;
+let browseCriteria = null;
 let reviewFilter = "all";
 const compareIds = new Set();
 const selectionDock = document.getElementById("selection-dock");
@@ -29,7 +32,7 @@ const selectionDock = document.getElementById("selection-dock");
 function saveDrafts() {
   if (!currentState.chat_id) return;
   try { sessionStorage.setItem("ekt-work-draft", JSON.stringify({chat: currentState.chat_id, rows: [...reviewDrafts],
-    edits: [...selectionEdits], quantities: [...draftQuantities], message: input.value, localSelectionInputs})); } catch {}
+    edits: [...selectionEdits], quantities: [...draftQuantities], message: input.value, localSelectionInputs, submittedDraft})); } catch {}
 }
 
 function selectedInputs() {
@@ -104,7 +107,7 @@ function renderSelection() {
       if (proposal) { log.querySelector(".slip")?.remove(); proposal = null; currentState.proposal = null; clearTimeout(expiryTimer); }
       prepare.hidden = false;
     });
-    label.append(quantity, document.createTextNode(" " + (item.source_unit || product?.unit || "единица не подтверждена")));
+    label.append(quantity, document.createTextNode(" " + (item.source_unit || product?.unit || "единицу уточните")));
     const remove = el("button", "ghost", "Убрать"); remove.type = "button";
     remove.addEventListener("click", () => { selectionEdits.delete(key); updateSelection(selectedInputs().filter(x => Workflow.key(x) !== key)); });
     row.append(label, remove);
@@ -204,7 +207,7 @@ function bubble(role, text) {
   return node;
 }
 
-function renderHits(items, snapshot = currentState.snapshot) {
+function renderHits(items) {
   if (!items?.length) return;
   const verified = items.filter(item => !item.unverified_specs?.length);
   const uncertain = items.filter(item => item.unverified_specs?.length);
@@ -212,13 +215,13 @@ function renderHits(items, snapshot = currentState.snapshot) {
   const heading = el("div", "results-heading");
   heading.append(el("h2", null, verified.length ? "Найдено в каталоге" : "Нужно уточнить характеристики"));
   if (verified.length) heading.append(el("span", "article", String(verified.length)));
-  heading.append(snapshotDetails(snapshot));
+  heading.append(snapshotDetails());
   section.append(heading);
   if (verified.length) section.append(productList(verified));
   if (uncertain.length) {
     const review = el("details", "uncertain-results");
     review.open = !verified.length;
-    review.append(el("summary", null, "Характеристики не подтверждены · " + uncertain.length),
+    review.append(el("summary", null, "Нужно уточнить характеристики · " + uncertain.length),
       el("p", "results-note", "Проверьте характеристики у поставщика или уточните артикул в поиске."),
       productList(uncertain));
     section.append(review);
@@ -226,13 +229,10 @@ function renderHits(items, snapshot = currentState.snapshot) {
   log.append(section);
 }
 
-function snapshotDetails(snapshot) {
+function snapshotDetails() {
   const details = el("details", "snapshot-note");
   details.append(el("summary", null, "О ценах и наличии"));
-  const date = new Date(snapshot?.indexed_at);
-  const stamp = snapshot?.indexed_at && !Number.isNaN(date.getTime())
-    ? "Каталог собран " + date.toLocaleDateString("ru-RU") + ". " : "";
-  details.append(el("p", null, stamp + "Цены и остатки — из снимка каталога. Дата обновления данных поставщиком не подтверждена."));
+  details.append(el("p", null, "Цены и наличие могут измениться. Уточните актуальные условия у поставщика."));
   return details;
 }
 
@@ -269,7 +269,7 @@ function productList(items) {
 }
 
 function renderProduct(item) {
-  const row = el("article", "hit");
+  const row = el("article", "hit"); row.dataset.productId = item.id;
   if (currentState.selection?.some(line => line.product_id === item.id)) row.classList.add("is-selected");
   const thumb = el("div", "hit-thumb");
   if (item.image) {
@@ -289,13 +289,15 @@ function renderProduct(item) {
   } else title.textContent = item.name;
   body.append(title);
   const compareLabel = el("label", "compare-choice");
-  const compare = el("input"); compare.type = "checkbox"; compare.checked = compareIds.has(item.id);
+  const compare = el("input"); compare.type = "checkbox"; compare.setAttribute("aria-label", "Сравнить: " + item.name); compare.checked = compareIds.has(item.id);
   compareLabel.append(compare, document.createTextNode("Сравнить"));
   compare.addEventListener("change", () => {
     if (compare.checked && compareIds.size >= 3) { compare.checked = false; showStatus("Для сравнения выберите не больше трёх товаров."); return; }
     compare.checked ? compareIds.add(item.id) : compareIds.delete(item.id);
     updateCompareButton();
   });
+  const keySpecs=Object.entries(item.key_specs||{});
+  if(keySpecs.length)body.append(el("p","article",keySpecs.map(([label,value])=>label+": "+value).join(" · ")));
   body.append(compareLabel);
   if (item.analog_reason) body.append(el("p", "article", item.analog_reason));
   if (item.comparison) {
@@ -313,27 +315,22 @@ function renderProduct(item) {
   body.append(alternatives);
   const summary = el("div", "hit-summary");
   const price = el("span", "price-group");
-  const unitLabel = item.unit_known === true ? item.unit : "единица продажи не подтверждена";
+  const unitLabel = item.unit_known === true ? item.unit : "уточните единицу продажи";
   price.append(el("strong", "hit-price", item.price_label || money(item.price)),
     el("span", "price-unit", item.unit_known === true ? " / " + unitLabel : " · " + unitLabel));
   summary.append(price);
   const options = item.purchase_options || { can_add: false, reason: "Обновите страницу для проверки количества." };
-  const stock = item.quantity == null ? "Остаток неизвестен" : item.quantity <= 0 ? "Нет по снимку каталога"
-    : "Остаток: " + Number(item.quantity).toLocaleString("ru-RU", { maximumFractionDigits: 6 })
-      + (item.unit_known === true ? " " + unitLabel : " (единица не подтверждена)");
+  const stock = item.quantity == null || (item.quantity > 0 && item.unit_known !== true) ? "Наличие уточняйте" : item.quantity <= 0 ? "Нет в наличии"
+    : "В наличии: " + Number(item.quantity).toLocaleString("ru-RU", { maximumFractionDigits: 6 })
+      + " " + unitLabel;
   summary.append(el("span", item.quantity === 0 ? "stock out" : "stock", stock));
   body.append(summary);
   if (item.min_quantity) body.append(el("p", "article", "Минимальная партия: " + item.min_quantity + " " + unitLabel));
   if (item.quantity_step) body.append(el("p", "article", "Кратность: " + item.quantity_step + " " + unitLabel));
-  for (const length of item.lengths || []) body.append(el("p", "article", (length.label || "Длина") + ": " + (length.raw || length.value || length.metres || "неизвестна") + " · не является количеством упаковок"));
+  for (const length of item.lengths || []) body.append(el("p", "article", (length.label || "Длина") + ": " + (length.raw_value ?? (length.metres != null ? length.metres + " м" : "неизвестна")) + " · не является количеством упаковок"));
   const meta = el("div", "hit-meta");
   const details = el("details", "product-details");
-  details.append(el("summary", null, "Подробнее"), el("p", null, "Артикул " + (item.article || "ID " + item.id)));
-  if (item.source_observed_at) {
-    const observed = new Date(item.source_observed_at);
-    if (!Number.isNaN(observed.getTime()))
-      details.append(el("p", null, "Данные товара получены " + observed.toLocaleString("ru-RU")));
-  }
+  details.append(el("summary", null, "Подробнее"), el("p", null, item.article ? "Артикул " + item.article : "Код товара " + item.id));
   if (item.purchase_rule_note) details.append(el("p", null,
     item.purchase_rule_note.startsWith("Исходное поле KRATNOST_MIN:")
       ? "Минимальную партию и кратность уточните у поставщика."
@@ -353,7 +350,7 @@ function renderProduct(item) {
   if (links.childNodes.length) details.append(links);
   if (meta.childNodes.length) body.append(meta);
   if (item.unverified_specs?.length) {
-    body.append(el("p", "cart-limit", "Не подтверждено: " + item.unverified_specs.join(", ") + "."));
+    body.append(el("p", "cart-limit", "Уточните характеристики: " + item.unverified_specs.join(", ") + "."));
   }
   if (options.can_add && item.unit_known === true && item.purchase_rules_confirmed === true && !item.unverified_specs?.length) {
     const controls = el("div", "hit-actions");
@@ -403,7 +400,7 @@ function renderProduct(item) {
     if (item.image) row.append(thumb);
     row.append(body);
     if (!item.unverified_specs?.length && !(item.quantity != null && Number(item.quantity) <= 0))
-      body.append(el("p", "cart-limit", options.reason || "Условия покупки не подтверждены. Уточните их у поставщика."));
+      body.append(el("p", "cart-limit", options.reason || "Уточните условия покупки у поставщика."));
   }
   return row;
 }
@@ -485,6 +482,8 @@ function renderState(data, { focus } = {}) {
   }
   const scrollTop = log.scrollTop;
   const focusedLabel = document.activeElement?.getAttribute("aria-label");
+  const detailKey = node => (node.closest("[data-row-id]")?.dataset.rowId || node.closest("[data-product-id]")?.dataset.productId || node.className) + ":" + node.querySelector("summary")?.textContent;
+  const openDetails = new Set([...log.querySelectorAll("details[open]")].map(detailKey));
   currentState = { ...currentState, ...data };
   if (["added", "already_added"].includes(data.status)) { draftQuantities.clear(); selectionEdits.clear(); localSelectionInputs = null; }
   if (selectionEdits.size || localSelectionInputs) currentState.proposal = null;
@@ -500,7 +499,7 @@ function renderState(data, { focus } = {}) {
   for (const item of messages) {
     bubble(item.role, item.content);
     if (item.sources?.length) renderConsultation({sources: item.sources});
-    renderHits(item.products, item.snapshot);
+    renderHits(item.products);
   }
   renderConsultation({...currentState, sources: [], snapshot: null});
   if (!currentState.messages?.length) renderHits(currentState.products);
@@ -523,6 +522,7 @@ function renderState(data, { focus } = {}) {
     || log.querySelector(".spec-review") || log.querySelector(".results")
     || log.lastElementChild;
   if (focus === "preserve") {
+    for (const detail of log.querySelectorAll("details")) if (openDetails.has(detailKey(detail))) detail.open = true;
     log.scrollTop = scrollTop;
     if (focusedLabel) [...log.querySelectorAll("[aria-label]")].find(el => el.getAttribute("aria-label") === focusedLabel)?.focus({preventScroll:true});
   } else if (target && target !== welcome) target.scrollIntoView({ block: "start" });
@@ -539,7 +539,7 @@ function renderConsultation(state) {
     if (link) sources.append(link);
   }
   if (sources.childNodes.length) log.append(sources);
-  if (state.snapshot?.indexed_at && !state.products?.length) log.append(snapshotDetails(state.snapshot));
+  if (state.snapshot?.indexed_at && !state.products?.length) log.append(snapshotDetails());
   for (const issue of state.attachment_issues || []) log.append(el("p", "attachment-issue", issue));
   if (state.attachment_review?.length) renderReview(state);
 }
@@ -553,7 +553,10 @@ async function reviewAction(item, action, values = {}) {
       body:JSON.stringify({action,...values})});
     const data = await response.json();
     if (!response.ok) { showStatus(formatErrors(data)); return; }
-    reviewDrafts.delete(item.row_id); saveDrafts(); renderState(data, {focus:"preserve"});
+    const draft=rowDraft(item);
+    if (["reopen","exclude"].includes(action)) reviewDrafts.delete(item.row_id);
+    else reviewDrafts.set(item.row_id,{...draft,product:["search","alternatives"].includes(action)?"":draft.product,query:undefined,unit:undefined});
+    saveDrafts(); renderState(data, {focus:"preserve"});
     showStatus(action === "reopen" ? "Строка открыта повторно. Новое добавление потребует подтверждения." : "Строка обновлена.");
   } catch { showStatus("Нет связи. Исправления сохранены на экране, повторите действие."); }
   finally { setBusy(false); }
@@ -570,13 +573,14 @@ let reviewPage = 0;
 function renderReview(state) {
   const review = el("section", "spec-review"); review.id = "spec-review";
   const rows = state.attachment_review;
+  let updateCounts = () => {};
   const counts = {added:0, excluded:0, ready:0, unresolved:0};
   for (const row of rows) {
     const draft = rowDraft(row); const product = row.candidates.find(p => p.id === Number(draft.product));
     counts[["added","excluded"].includes(row.completion) ? row.completion : Workflow.eligible(row,product,draft.quantity) ? "ready" : "unresolved"]++;
   }
-  review.append(el("h2", null, "Разбор спецификации"), el("p", "review-summary", `${rows.length} строк · готово ${counts.ready} · уточнить ${counts.unresolved} · добавлено ${counts.added} · исключено ${counts.excluded}`));
-  for (const doc of state.document_summary || []) review.append(el("p", "article", `${doc.filename}: сверено ${doc.reviewed_rows} из ${doc.source_rows} непустых строк данных.`));
+  review.append(el("h2", null, "Товары из вашего файла"), el("p", "review-summary", `${rows.length} строк · готово ${counts.ready} · уточнить ${counts.unresolved} · добавлено ${counts.added} · исключено ${counts.excluded}`));
+  for (const doc of state.document_summary || []) review.append(el("p", "article", `${doc.filename}: проверено ${doc.reviewed_rows} из ${doc.source_rows} строк.`));
   const tools = el("div", "tool-row");
   const filter = el("select"); filter.setAttribute("aria-label","Фильтр строк");
   for (const [value,label] of [["all","Все строки"],["issues","Нужно уточнить"],["ready","Готовые"],["added","Добавленные"],["excluded","Исключённые"]]) filter.append(new Option(label,value));
@@ -608,10 +612,10 @@ function renderReview(state) {
       const reopen=el("button","ghost",item.completion==="added" ? "Добавить повторно" : "Вернуть строку");reopen.type="button";
       reopen.addEventListener("click",()=>reviewAction(item,"reopen"));row.append(reopen);review.append(row);continue;
     }
-    const include=el("input");include.type="checkbox";include.checked=draft.checked;
+    const include=el("input");include.type="checkbox";include.checked=draft.checked;include.setAttribute("aria-label","Выбрать: "+item.source_reference);
     const select=el("select");select.setAttribute("aria-label","Товар: "+item.source_reference);select.append(new Option("Выберите товар",""));
     for(const product of item.candidates){
-      const option=new Option(`${product.article||product.id} · ${product.name} · ${product.price_label||"цена неизвестна"} / ${product.unit_label||product.unit} · остаток ${product.quantity??"неизвестен"}`,String(product.id));
+      const option=new Option(`${product.article||product.id} · ${product.name} · ${product.price_label||"цена неизвестна"} / ${product.unit_known ? product.unit : "единицу уточните"} · ${product.quantity == null || !product.unit_known ? "наличие уточняйте" : "в наличии " + product.quantity}`,String(product.id));
       select.append(option);
     }
     select.value=draft.product;
@@ -621,15 +625,16 @@ function renderReview(state) {
     const controls=el("div","spec-controls");controls.append(includeLabel,select,quantity,el("span","article",item.source_unit||"Единица в документе не указана"));row.append(controls);
     const detail=el("div","candidate-facts");row.append(detail);
     const update=()=>{
-      reviewDrafts.set(item.row_id,{...reviewDrafts.get(item.row_id),checked:include.checked,product:select.value,quantity:quantity.value});saveDrafts();
+      reviewDrafts.set(item.row_id,{...reviewDrafts.get(item.row_id),checked:include.checked,product:select.value,quantity:quantity.value});saveDrafts();updateCounts();
       const product=item.candidates.find(p=>p.id===Number(select.value));detail.replaceChildren();
       if(product){
         const options=product.purchase_options;
-        detail.append(el("p","article",`Единица продажи: ${product.unit_label||product.unit}. Остаток: ${product.quantity??"неизвестен"}.`));
+        detail.append(el("p","article",`Единица продажи: ${product.unit_known ? product.unit : "уточняйте"}. ${product.quantity == null || !product.unit_known ? "Наличие уточняйте" : "В наличии: " + product.quantity}.`));
         if(options && !options.can_add)detail.append(el("p","field-error",options.reason));
+        if(!item.source_unit)detail.append(el("p","field-error","Укажите единицу измерения из документа."));
         if(item.source_unit && Workflow.unit(item.source_unit)!==Workflow.unit(product.unit))detail.append(el("p","field-error","Единицы различаются. Уточните единицу; автоматического пересчёта нет."));
         for(const field of product.comparison?.differences||[])detail.append(el("p","article",`${field.attribute}: ${field.source} → ${field.candidate}`));
-        if(product.comparison?.unknowns?.length)detail.append(el("p","article","Не подтверждено: "+product.comparison.unknowns.join(", ")));
+        if(product.comparison?.unknowns?.length)detail.append(el("p","article","Уточните: "+product.comparison.unknowns.join(", ")));
         const link=safeLink("Карточка поставщика",product.url);if(link)detail.append(link);
       }
     };
@@ -665,7 +670,16 @@ function renderReview(state) {
     if(items.some(i=>!i.product_id||!(Number(i.quantity)>0))){showStatus("Выберите товар и положительное количество для отмеченных строк.");return;}
     updateSelection(Workflow.merge(manual,items),true);
   });
-  review.append(el("p","article","Отмечено строк: "+selectedCount+". Добавленные строки исключаются из следующей партии."),prepare);log.append(review);
+  const selectedSummary=el("p","article");
+  updateCounts=()=>{
+    const totals={added:0,excluded:0,ready:0,unresolved:0};
+    for(const row of rows){const draft=rowDraft(row);const product=row.candidates.find(p=>p.id===Number(draft.product));totals[["added","excluded"].includes(row.completion)?row.completion:Workflow.eligible(row,product,draft.quantity)?"ready":"unresolved"]++;}
+    review.querySelector(".review-summary").textContent=`${rows.length} строк · готово ${totals.ready} · уточнить ${totals.unresolved} · добавлено ${totals.added} · исключено ${totals.excluded}`;
+    const count=rows.filter(r=>rowDraft(r).checked).length;
+    selectedSummary.textContent="Отмечено строк: "+count+". Добавленные строки исключаются из следующей партии.";
+    prepare.textContent=count>50?"Подготовить следующую партию (до 50 строк)":"Проверить выбранные строки";
+  };
+  updateCounts();review.append(selectedSummary,prepare);log.append(review);
 }
 
 async function changeCart(action, id) {
@@ -697,6 +711,7 @@ function renderFiles() {
   });
 }
 attachBtn.addEventListener("click", () => fileInput.click());
+document.getElementById("upload-spec").addEventListener("click", () => { if (!busy) fileInput.click(); });
 fileInput.addEventListener("change", () => {
   const selected = Array.from(fileInput.files || []);
   const next = [...files, ...selected];
@@ -714,7 +729,7 @@ function resizeMessage() {
   input.style.overflowY = input.scrollHeight > 128 ? "auto" : "hidden";
   input.style.height = Math.min(input.scrollHeight, 128) + "px";
 }
-input.addEventListener("input", resizeMessage);
+input.addEventListener("input", () => { resizeMessage(); saveDrafts(); });
 input.addEventListener("keydown", event => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); form.requestSubmit(); }
 });
@@ -733,11 +748,12 @@ form.addEventListener("submit", async event => {
   const submittedFiles = [...files];
   const restoreDraft = () => {
     input.value = text + (input.value ? "\n\n" + input.value : "");
-    resizeMessage();
+    submittedDraft = null; resizeMessage(); saveDrafts();
   };
   turn.restore = restoreDraft;
   activeChat = turn;
-  input.value = ""; resizeMessage();
+  submittedDraft = {id:turn.id, text, files:submittedFiles.map(file => file.name)};
+  input.value = ""; resizeMessage(); saveDrafts();
   setBusy(true);
   showStatus("");
   welcome.remove();
@@ -757,6 +773,7 @@ form.addEventListener("submit", async event => {
       showStatus(data.error || data.detail || "Не удалось получить ответ.");
       return;
     }
+    submittedDraft = null;
     files = files.filter(file => !submittedFiles.includes(file));
     fileInput.value = "";
     renderFiles();
@@ -765,48 +782,90 @@ form.addEventListener("submit", async event => {
     showStatus(data.ok === false ? data.error : "");
   } catch (error) {
     if (activeChat !== turn || turn.generation !== viewGeneration) return;
-    restoreDraft();
-    renderState(currentState);
-    showStatus("Нет связи с сервером. Сообщение сохранено в поле ввода.");
+    activeChat = null; recoveredRequest = turn.id;
+    renderState(currentState); setBusy(true); saveDrafts();
+    showStatus("Связь прервалась. Проверяем, завершён ли ответ…");
+    pollRequest();
   }
-  finally { if (activeChat === turn) { activeChat = null; setBusy(false); } }
+  finally { if (activeChat === turn) { activeChat = null; setBusy(false); saveDrafts(); } }
 });
 
 stopBtn.addEventListener("click", async () => {
   const turn = activeChat;
-  if (!turn) return;
+  const id = turn?.id || recoveredRequest;
+  if (!id) return;
   stopBtn.disabled = true;
   try {
-    const response = await fetch("/api/chat/stop", {method: "POST", headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf}, body: JSON.stringify({request_id: turn.id})});
+    const response = await fetch("/api/chat/stop", {method:"POST", headers:{"Content-Type":"application/json", "X-CSRF-Token":csrf}, body:JSON.stringify({request_id:id})});
     const data = await response.json();
     if (!response.ok) { showStatus(data.error || "Не удалось остановить ответ."); return; }
-    if (activeChat !== turn) return;
-    turn.controller.abort(); activeChat = null;
-    if (data.stopped) turn.restore();
-    renderState(data);
-    showStatus(data.stopped ? "Ответ остановлен. Сообщение сохранено для повторной отправки." : "Ответ уже готов.");
-    setBusy(false);
+    if (turn && activeChat !== turn) return;
+    turn?.controller.abort(); activeChat = null; recoveredRequest = null; clearTimeout(recoveryTimer);
+    if (data.stopped) { if (turn) turn.restore(); else restoreSubmitted(); }
+    renderState(data); setBusy(false); saveDrafts();
+    showStatus(data.stopped ? "Ответ остановлен. Текст сохранён для повторной отправки." : "Ответ уже готов.");
   } catch { showStatus("Нет связи. Попробуйте остановить ответ ещё раз."); }
   finally { stopBtn.disabled = false; }
 });
 
 newChatBtn.addEventListener("click", async () => {
   newChatBtn.disabled = true;
+  if ((currentState.messages?.length || selectedInputs().length || currentState.attachment_review?.length || input.value || files.length) && !(await confirmNewChat())) {
+    newChatBtn.disabled = false; newChatBtn.focus(); return;
+  }
   try {
     const response = await fetch("/api/chat/new", {method: "POST", headers: {"X-CSRF-Token": csrf}});
     const data = await response.json();
     if (!response.ok) { showStatus(data.error || "Не удалось начать новый чат."); return; }
     retiredChats.add(currentState.chat_id);
     viewGeneration++;
-    activeChat?.controller.abort(); activeChat = null;
+    activeChat?.controller.abort(); activeChat = null; recoveredRequest = null; clearTimeout(recoveryTimer); submittedDraft = null;
     input.value = ""; files = []; resizeMessage(); renderFiles();
-    draftQuantities.clear(); reviewDrafts.clear(); shownResults.clear();
+    draftQuantities.clear(); reviewDrafts.clear(); shownResults.clear(); selectionEdits.clear(); localSelectionInputs = null; compareIds.clear(); updateCompareButton();
     renderState(data); saveDrafts(); setBusy(false);
     showStatus("Начат новый чат. Товары в корзине сохранены.");
     input.focus();
   } catch { showStatus("Нет связи. Ваш текущий чат сохранён."); }
   finally { newChatBtn.disabled = !csrf; }
 });
+
+function confirmNewChat() {
+  const dialog = document.getElementById("new-chat-dialog");
+  dialog.returnValue = "cancel";
+  return new Promise(resolve => { dialog.addEventListener("close", () => resolve(dialog.returnValue === "discard"), {once:true}); dialog.showModal(); });
+}
+
+function restoreSubmitted() {
+  if (!submittedDraft) return;
+  const text = submittedDraft.text;
+  if (text && !input.value.startsWith(text)) input.value = text + (input.value ? "\n\n" + input.value : "");
+  submittedDraft = null; resizeMessage(); saveDrafts();
+}
+
+async function pollRequest() {
+  if (!recoveredRequest) return;
+  const id = recoveredRequest;
+  try {
+    const response = await fetch("/api/state"); if (!response.ok) throw new Error();
+    const data = await response.json();
+    if (recoveredRequest !== id) return;
+    if (data.busy) {
+      showStatus(({validating:"Проверяем файлы…",reading:"Читаем документ и сопоставляем строки…",searching:"Ищем товары и готовим ответ…"})[data.request_status?.stage] || "Ответ ещё готовится…");
+      recoveryTimer = setTimeout(pollRequest, 1500); return;
+    }
+    recoveredRequest = null;
+    if (submittedDraft && data.request_status?.id === submittedDraft.id && data.request_status.stage === "complete") {
+      files=files.filter(file=>!submittedDraft.files?.includes(file.name)); renderFiles(); submittedDraft=null;
+    } else restoreSubmitted();
+    renderState(data); setBusy(false); saveDrafts();
+    showStatus(data.request_status?.error || (localSelectionInputs ? "Ответ готов. Проверьте сохранённый черновик выбора." : ""));
+    document.getElementById("retry-state").hidden = true;
+  } catch {
+    showStatus("Связь прервалась. Восстанавливаем состояние ответа…");
+    document.getElementById("retry-state").hidden = false;
+    recoveryTimer = setTimeout(pollRequest, 4000);
+  }
+}
 
 async function boot() {
   setBusy(true);
@@ -815,11 +874,92 @@ async function boot() {
     if (!res.ok) throw new Error();
     const data = await res.json();
     try {
-      const saved = JSON.parse(sessionStorage.getItem("ekt-review-draft"));
-      if (saved?.chat === data.chat_id) for (const [key, value] of saved.rows) reviewDrafts.set(key, value);
+      const saved = JSON.parse(sessionStorage.getItem("ekt-work-draft") || sessionStorage.getItem("ekt-review-draft"));
+      if (saved?.chat === data.chat_id) {
+        for (const [key,value] of saved.rows || []) reviewDrafts.set(key,value);
+        for (const [key,value] of saved.edits || []) selectionEdits.set(key,value);
+        for (const [key,value] of saved.quantities || []) draftQuantities.set(key,value);
+        input.value = saved.message || ""; localSelectionInputs = saved.localSelectionInputs || null; submittedDraft = saved.submittedDraft || null; resizeMessage();
+      }
     } catch {}
+    recoveredRequest = data.busy ? data.active_request : null;
     renderState(data);
-    setBusy(false);
-  } catch { showStatus("Не удалось загрузить чат. Обновите страницу."); }
+    setBusy(Boolean(recoveredRequest));
+    document.getElementById("retry-state").hidden = true;
+    if (recoveredRequest) {
+      welcome.remove();
+      if (submittedDraft) bubble("user",submittedDraft.text || "Посмотрите вложение.");
+      pollRequest();
+    }
+    else if (submittedDraft) {
+      if (data.request_status?.id === submittedDraft.id && data.request_status.stage === "complete") submittedDraft = null;
+      else { const hadFiles = submittedDraft.files?.length; restoreSubmitted(); showStatus("Незавершённый текст восстановлен." + (hadFiles ? " Файлы приложите заново." : "")); }
+      saveDrafts();
+    }
+  } catch { showStatus("Не удалось загрузить чат. Повторите загрузку."); document.getElementById("retry-state").hidden = false; }
 }
+
+document.getElementById("retry-state").addEventListener("click", () => {clearTimeout(recoveryTimer); recoveredRequest ? pollRequest() : boot();});
+window.addEventListener("pagehide",saveDrafts);
+window.addEventListener("beforeunload", event => {saveDrafts(); if (files.length && !activeChat) {event.preventDefault();event.returnValue="";}});
+
+function updateCompareButton() {
+  const button = document.getElementById("compare-products");
+  button.disabled = compareIds.size < 2;
+  button.textContent = "Сравнить (" + compareIds.size + "/3)";
+  document.getElementById("compare-hint").textContent = compareIds.size === 0
+    ? (browseResults?.results.length ? "Отметьте «Сравнить» у 2–3 карточек в результатах ниже." : "Найдите товары, затем отметьте «Сравнить» у 2–3 карточек в результатах ниже.")
+    : compareIds.size === 1
+      ? "Выбран 1 товар. Отметьте ещё один товар в результатах."
+      : compareIds.size === 2
+        ? "Выбрано 2 товара. Нажмите «Сравнить» или выберите третий."
+        : "Выбрано 3 товара. Нажмите «Сравнить», чтобы увидеть отличия.";
+}
+
+document.getElementById("compare-products").addEventListener("click", async () => {
+  const dialog=document.getElementById("comparison-dialog"); const content=document.getElementById("comparison-content");
+  content.replaceChildren(el("p",null,"Сопоставляем характеристики…")); dialog.showModal();
+  try {
+    const response=await fetch("/api/compare?ids="+[...compareIds].join(",")); const data=await response.json();
+    if(!response.ok)throw new Error(data.error);
+    content.replaceChildren(el("p","article",data.note));
+    const table=el("table","comparison-table");const caption=el("caption","sr-only","Сравнение выбранных товаров");table.append(caption);
+    const head=el("tr");head.append(el("th",null,"Параметр"));for(const product of data.products)head.append(el("th",null,product.name));table.append(head);
+    const attributes=[{name:"Артикул",values:data.products.map(p=>p.article)},{name:"Цена",values:data.products.map(p=>p.price_label)},
+      {name:"Единица продажи",values:data.products.map(p=>p.unit_known ? p.unit : "Уточняйте")},{name:"Наличие",values:data.products.map(p=>p.unit_known ? p.quantity??"Уточняйте" : "Уточняйте")},...data.attributes];
+    for(const attribute of attributes){const row=el("tr");const label=el("th",null,attribute.name);label.scope="row";row.append(label);for(const value of attribute.values)row.append(el("td",null,String(value)));table.append(row);}
+    const scroll=el("div","comparison-scroll");scroll.tabIndex=0;scroll.setAttribute("role","region");scroll.setAttribute("aria-label","Таблица сравнения, прокрутка по горизонтали");scroll.append(table);content.append(scroll);
+  }catch(error){content.replaceChildren(el("p",null,error.message||"Не удалось загрузить сравнение."));}
+});
+
+async function browseCatalog(more=false) {
+  if(browsePending)return;
+  const criteria=more&&browseCriteria?browseCriteria:{q:document.getElementById("catalog-query").value.trim(),sort:document.getElementById("catalog-sort").value,in_stock:String(document.getElementById("catalog-stock").checked)};
+  const query=criteria.q;if(!query)return;
+  const catalogStatus=document.getElementById("catalog-status");
+  const setCatalogStatus=message=>{catalogStatus.textContent=message;catalogStatus.hidden=!message;};
+  setCatalogStatus("Ищем товары…");
+  browsePending=true;
+  const params=new URLSearchParams({...criteria,offset:more ? String(browseResults?.results.length||0) : "0"});
+  const button=document.querySelector("#catalog-search button");button.disabled=true;
+  try {
+    const response=await fetch("/api/search?"+params);const data=await response.json();
+    if(!response.ok){setCatalogStatus(data.error||"Поиск недоступен. Обновите страницу или перезапустите приложение.");return;}
+    browseQuery=query; browseCriteria=criteria;
+    browseResults={...data,results:more ? [...(browseResults?.results||[]),...data.results] : data.results};
+    updateCompareButton();
+    setCatalogStatus("");
+    renderState(currentState,{focus:"preserve"});document.getElementById("browse-results")?.scrollIntoView({block:"start"});
+  }catch{setCatalogStatus("Поиск недоступен. Повторите попытку.");}finally{button.disabled=false;browsePending=false;}
+}
+function renderBrowseResults() {
+  if(!browseResults)return;
+  const section=el("section","results");section.id="browse-results";
+  section.append(el("h2",null,"Поиск: "+browseQuery),el("p","article",`Показано ${browseResults.results.length} из ${browseResults.total}`));
+  if(!browseResults.results.length)section.append(el("p",null,"Совпадений нет. Измените запрос или фильтр наличия."));
+  for(const item of browseResults.results)section.append(renderProduct(item));
+  if(browseResults.has_more){const more=el("button","show-more","Найти ещё товары");more.type="button";more.dataset.local="true";more.addEventListener("click",()=>browseCatalog(true));section.append(more);}
+  log.append(section);
+}
+document.getElementById("catalog-search").addEventListener("submit",event=>{event.preventDefault();browseCatalog();});
 boot();

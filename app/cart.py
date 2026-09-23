@@ -138,7 +138,7 @@ def purchase_rule_issue(product: dict) -> str:
         if not valid:
             missing.append(label)
     if missing:
-        return "Добавление недоступно: требуют подтверждения поставщика — " + ", ".join(missing) + "."
+        return "Чтобы добавить товар, уточните у поставщика: " + ", ".join(missing) + "."
     return ""
 
 
@@ -151,7 +151,7 @@ def purchase_options(session: Session, product: dict) -> dict:
     stock = number(product["quantity"])
     remaining = max(Decimal(0), stock - existing)
     if stock <= 0:
-        return {"can_add": False, "reason": "Нет в наличии по снимку каталога."}
+        return {"can_add": False, "reason": "Нет в наличии."}
     if issue := purchase_rule_issue(product):
         return {"can_add": False, "reason": issue}
     increment = number(product["quantity_step"])
@@ -240,6 +240,8 @@ def selection_draft(session, items, lookup):
                 if pid not in row["candidate_product_ids"]:
                     raise ValueError("Выберите товар из результатов этой строки.")
             source_unit = (row.get("source_unit") if row else item.get("source_unit")) or ""
+            if row and not source_unit:
+                errors.append({"product_id": pid, "source_id": sid, "error": "Уточните единицу количества в строке документа."})
             entry = {"product_id": pid, "quantity": str(qty), "source_id": sid, "source_unit": source_unit}
             inputs.append(entry)
             quantities[pid] = quantities.get(pid, Decimal(0)) + qty
@@ -300,7 +302,7 @@ def confirm_pending(session: Session, lookup, proposal_id: str, catalog_version:
             return {"ok": True, "status": "already_added", "cart": cart_view(session), "cart_url": "/cart"}
         pending = session.pending
         if not pending or pending.id != proposal_id or pending.owner != session.id:
-            return _err("предложение устарело или не принадлежит этой сессии")
+            return _err("Предложение устарело. Составьте новое.")
         if time.time() >= pending.expires_at:
             session.pending = None
             return _err("предложение истекло; запросите новое")

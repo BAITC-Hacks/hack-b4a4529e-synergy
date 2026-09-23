@@ -276,7 +276,7 @@ def test_supplier_quantity_is_not_warehouse_stock_and_description_is_complete():
     assert not purchase_options(Session("supplier"), p)["can_add"]
     from app.answers import catalog_answer
     answer = catalog_answer("Сколько у поставщика и когда поступление?", [hit])
-    assert "6" in answer and "72 часа" in answer and "не является сроком доставки" in answer
+    assert "6" in answer and "72 часа" in answer and "не означает срок доставки" in answer
 
 
 def test_http_failure_body_and_status_are_preserved(tmp_path, monkeypatch):

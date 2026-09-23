@@ -1,4 +1,4 @@
-"""Read-only browsing, comparison and location context using catalog facts."""
+"""Read-only browsing and comparison using catalog facts."""
 import numpy as np
 from .search import exact_matches, article_query, _embed_query, product_hit, constrain_results, MIN_SCORE
 from .alternatives import specs

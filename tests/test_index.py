@@ -1,4 +1,5 @@
 import json
+import zipfile
 from types import SimpleNamespace as Obj
 
 import pytest
@@ -53,6 +54,17 @@ def test_corrupted_products_cannot_load(tmp_path):
     (version / "products.json").write_text("[]")
     with pytest.raises(ValueError, match="checksum"):
         CatalogIndex.load(target)
+
+
+def test_single_file_index_bundle_loads_without_pointer(tmp_path):
+    data, target = tmp_path / "data", tmp_path / "index"
+    write_catalog(data, sample_products())
+    folder = build_index(data, target, client=Obj(embeddings=Embeddings()))
+    with zipfile.ZipFile(target / "catalog-index.zip", "w") as bundle:
+        for name in ("metadata.json", "products.json", "embeddings.npy"):
+            bundle.write(folder / name, name)
+    (target / "current.json").unlink()
+    assert CatalogIndex.load(target).get(101)["price"] == 64920
 
 
 def test_empty_catalog_cannot_publish(tmp_path):

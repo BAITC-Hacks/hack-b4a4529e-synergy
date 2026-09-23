@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
 import threading
+import zipfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -64,23 +66,38 @@ class CatalogIndex:
     @classmethod
     def load(cls, index_dir: Path | None = None):
         root = index_dir or INDEX_DIR
-        if (root / "current.json").exists():
-            version = json.loads((root / "current.json").read_text())["version"]
-            if not re.fullmatch(r"[0-9a-f]{32}", version):
-                raise ValueError("Invalid index version")
-            root = root / version
-        if not (root / "metadata.json").is_file():
-            raise FileNotFoundError("Индекс каталога не собран. Запустите: python -m app.index_build")
-        metadata = json.loads((root / "metadata.json").read_text())
+        if root.is_dir():
+            if (root / "current.json").exists():
+                version = json.loads((root / "current.json").read_text())["version"]
+                if not re.fullmatch(r"[0-9a-f]{32}", version):
+                    raise ValueError("Invalid index version")
+                root = root / version
+            elif (root / "catalog-index.zip").is_file():
+                root = root / "catalog-index.zip"
+        if root.is_file():
+            try:
+                with zipfile.ZipFile(root) as bundle:
+                    metadata_data = bundle.read("metadata.json")
+                    product_data = bundle.read("products.json")
+                    vector_data = bundle.read("embeddings.npy")
+            except (zipfile.BadZipFile, KeyError) as exc:
+                raise ValueError("Invalid catalog index bundle") from exc
+        else:
+            if not (root / "metadata.json").is_file():
+                raise FileNotFoundError("Индекс каталога не собран. Запустите: python -m app.index_build")
+            metadata_data = (root / "metadata.json").read_bytes()
+            product_data = (root / "products.json").read_bytes()
+            vector_data = (root / "embeddings.npy").read_bytes()
+        metadata = json.loads(metadata_data)
         if metadata["model"] != EMBED_MODEL:
             raise ValueError("Embedding model changed; rebuild the index")
         if metadata.get("embedding_template_version") != EMBEDDING_TEMPLATE_VERSION:
             raise ValueError("Embedding text template changed; rebuild the index")
-        for filename, key in (("products.json", "products_sha256"), ("embeddings.npy", "vectors_sha256")):
-            if hashlib.sha256((root / filename).read_bytes()).hexdigest() != metadata[key]:
-                raise ValueError("Index checksum mismatch")
-        products = json.loads((root / "products.json").read_text(encoding="utf-8"))
-        embeddings = np.load(root / "embeddings.npy", allow_pickle=False)
+        if (hashlib.sha256(product_data).hexdigest() != metadata["products_sha256"]
+                or hashlib.sha256(vector_data).hexdigest() != metadata["vectors_sha256"]):
+            raise ValueError("Index checksum mismatch")
+        products = json.loads(product_data)
+        embeddings = np.load(io.BytesIO(vector_data), allow_pickle=False)
         if embeddings.shape != (metadata["count"], metadata["dimensions"]):
             raise ValueError("Index metadata/vector mismatch")
         return cls(products, embeddings, metadata)
@@ -102,7 +119,12 @@ def get_index() -> CatalogIndex:
             return _index
         pointer = INDEX_DIR / "current.json"
         try:
-            stamp = pointer.read_text() if pointer.exists() else None
+            if pointer.exists():
+                stamp = pointer.read_text()
+            else:
+                bundle = INDEX_DIR / "catalog-index.zip"
+                stat = bundle.stat() if bundle.exists() else None
+                stamp = (stat.st_mtime_ns, stat.st_size) if stat else None
             if _index is None or stamp != _index_stamp:
                 _index = CatalogIndex.load()
                 _index_stamp = stamp
@@ -129,11 +151,12 @@ def product_hit(product: dict, score: float | None = None) -> dict:
         "certificate": safe_url(product.get("certificate")),
         "certificates": [url for value in product.get("certificates", []) if (url := safe_url(value))],
         "properties": public_properties(product.get("properties")),
+        "key_specs": dict(list(specs(product).items())[:4]),
         "stores": product.get("stores") or [],
         "min_quantity": product.get("min_quantity"), "quantity_step": product.get("quantity_step"),
         "purchase_rule_note": rule_issue or product.get("purchase_rule_note") or "",
         "purchase_rules_confirmed": not bool(rule_issue),
-        "unit_label": product["unit"] if product.get("unit_known") and product.get("unit") else "единица продажи не подтверждена",
+        "unit_label": product["unit"] if product.get("unit_known") and product.get("unit") else "Единицу продажи уточните",
         "source_observed_at": product.get("source_observed_at"),
         "unit_known": product.get("unit_known", False),
         "unit_source": product.get("unit_source"),
@@ -305,7 +328,7 @@ def search_products(query: str, limit: int = 5, *, index=None, embed_query=None,
     return {"query": query, "results": hits, "ambiguous": ambiguous,
             "needs_clarification": not hits or ambiguous or bool(hits[0].get("unverified_specs")),
             "snapshot": catalog.metadata,
-            "note": "Остатки и цены из снимка; добавление не резервирует товар."}
+            "note": "Цены и наличие могут измениться; добавление не резервирует товар."}
 
 
 def get_product(product_id: int, *, index=None) -> dict:

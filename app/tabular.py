@@ -50,7 +50,7 @@ def extract_rows(file):
     for sheet, values in sheets(file):
         columns = {}
         for line, cells in enumerate(values, 1):
-            cells = [str(int(v)) if isinstance(v, float) and v.is_integer() else str(v or "").strip() for v in cells]
+            cells = [str(int(v)) if isinstance(v, float) and v.is_integer() else str(v if v is not None else "").strip() for v in cells]
             if not any(cells):
                 continue
             found = {key: i for i, cell in enumerate(cells) for key, aliases in HEADERS.items() if cell.casefold() in aliases}
@@ -76,14 +76,17 @@ def extract_rows(file):
 
 
 def process_tables(session, files, index):
+    match_cache = {}
     for file in files:
         rows = extract_rows(file)
-        if len(rows) + len(session.attachment_review) > 20000:
+        document_id = hashlib.sha256(file["data"]).hexdigest()
+        other_rows = sum(row.get("document_id") != document_id for row in session.attachment_review)
+        if len(rows) + other_rows > 20000:
             raise ValueError("В одном подборе поддерживается до 20 000 строк.")
         for start in range(0, len(rows), 100):
             if session.cancel_event.is_set():
                 raise RuntimeError("response cancelled")
-            review_items(session, rows[start:start + 100], index, {file["filename"]}, local_only=True)
+            review_items(session, rows[start:start + 100], index, {file["filename"]}, local_only=True, match_cache=match_cache)
         document_id = hashlib.sha256(file["data"]).hexdigest()
         actual = sum(row.get("document_id") == document_id for row in session.attachment_review)
         if actual != len(rows):

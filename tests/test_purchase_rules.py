@@ -19,14 +19,14 @@ def test_unconfirmed_terms_block_controls_and_server_additions(changes):
     product = {**sample_products()[0], **changes}
     session = Session("terms")
     options = purchase_options(session, product)
-    assert not options["can_add"] and "подтверждения поставщика" in options["reason"]
+    assert not options["can_add"] and "уточните у поставщика" in options["reason"]
     assert "step" not in options and "suggested_quantity" not in options
     assert not propose_add_to_cart(session, product, 2)["ok"]
     assert not session.cart and session.pending is None
     hit = product_hit(product)
     assert hit["purchase_rules_confirmed"] is False
     answer = catalog_answer("найди товар", [hit])
-    assert "подтверждения поставщика" in answer and "укажите количество" not in answer.lower()
+    assert "уточните у поставщика" in answer and "укажите количество" not in answer.lower()
 
 
 def test_metre_flag_and_ambiguous_numbers_do_not_authorize_cut_lengths():
@@ -72,10 +72,10 @@ def test_unknown_unit_is_exposed_in_cards_and_purchase_terms():
     product = normalize_product({"id": 1, "name": "Товар", "price": 10, "quantity": 5,
                                  "min_quantity": 1, "quantity_step": 1})
     hit = product_hit(product)
-    assert not hit["unit_known"] and hit["unit_label"] == "единица продажи не подтверждена"
+    assert not hit["unit_known"] and hit["unit_label"] == "Единицу продажи уточните"
     answer = terms_answer(get_purchase_terms("minimum", product=product))
-    assert "единица продажи не подтверждена" in answer
-    assert "подтверждения поставщика" in answer
+    assert "единицу продажи уточните у поставщика" in answer
+    assert "уточните у поставщика" in answer
 
 
 def test_http_selection_and_batch_cannot_bypass_purchase_gate():

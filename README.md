@@ -1,12 +1,21 @@
-# EKT catalog consultant
+# HackAlem AI — консультант каталога EKT
 
-A Russian-language shopping assistant for the [ekt.kz](https://ekt.kz) catalog. It searches a downloaded catalog by article or description, shows product details and stock from that snapshot, and prepares a local cart. Adding items always requires explicit confirmation. This is a hackathon prototype; it does not place an order or reserve stock.
+## Кратко для жюри
+
+- **Задача:** помочь покупателю найти электротовары по артикулу или описанию, сравнить аналоги и разобрать спецификацию. Цены и остатки показаны из проверяемого снимка каталога EKT, а неподтверждённые условия продажи не выдумываются.
+- **Технологии:** Python 3.12, FastAPI и Uvicorn; HTML, CSS и JavaScript без фронтенд-фреймворка; OpenAI API для диалога и эмбеддингов; NumPy для поиска, SQLite для кеша эмбеддингов. Источник товаров — API EKT.
+- **Запуск:** установите зависимости, скачайте подготовленные данные с Kaggle и распакуйте их в `data/`, укажите `OPENAI_API_KEY` в `.env` и запустите сервер. Инструкция — в разделе [Run with prepared Kaggle data](#run-with-prepared-kaggle-data). Для этого пути не нужны доступ к API EKT и повторное построение эмбеддингов.
+- **Проверка:** без ключей выполните команды из [Reviewer quick start](#reviewer-quick-start); при наличии Node.js дополнительно запустите `node --test tests/frontend_workflows.cjs`. Для проверки уже подготовленного приложения откройте `http://localhost:8000`, найдите артикул `151100015_` и проверьте `/api/ready`.
+
+В текущем снимке EKT нет подтверждённых минимальной партии и шага покупки, поэтому добавление реальных товаров в корзину заблокировано. Логику подтверждения корзины проверяют автоматические тесты с синтетическими товарами.
+
+A Russian-language shopping assistant for the [ekt.kz](https://ekt.kz) catalog. It searches a downloaded catalog by article or description and shows product details and stock from that snapshot. Products with confirmed purchase rules can be prepared for a local cart, and adding them always requires explicit confirmation. This is a hackathon prototype; it does not place an order or reserve stock.
 
 The app uses a snapshot because semantic search needs a prebuilt embedding index for the catalog. It calls the EKT API when downloading or refreshing data, not for each chat request. This makes searches independent of EKT API availability during a demo, but prices and stock can become stale.
 
 ## Reviewer quick start
 
-The automated tests need **no API keys, catalog download, or network access** after dependencies and the public tokenizer vocabulary are cached:
+The automated tests need **no API keys or catalog download**. Run this first; the prepared Kaggle data lets you run the UI without downloading or embedding the catalog yourself:
 
 ```bash
 python3 -m venv .venv
@@ -18,9 +27,28 @@ python -m pytest -q
 
 Use Python 3.12. On Windows, run these commands in WSL/Ubuntu: the catalog downloader uses Unix file locking. CI runs the same test command on every push and pull request.
 
-To try the live UI, you need an OpenAI API key and EKT catalog API credentials. The latter are needed only to obtain the catalog snapshot; tests use fixtures. Credentials and downloaded data are not committed.
+To try the live UI with the prepared Kaggle data, you need an OpenAI API key for chat and semantic queries. EKT catalog API credentials are needed only to download a fresh snapshot. Tests use fixtures. Credentials and downloaded data are not committed.
 
-## Run the live demo locally
+## Run with prepared Kaggle data
+
+The prepared Kaggle package contains exactly two files: the current catalog CSV and one file with the saved embeddings plus matching product records for 15,037 products. **Kaggle dataset link: add after upload.** Download the password-protected archive, obtain its password from the submission, and extract its `data/` directory into the repository root. The repository already contains the empty `data/` directory; keep it and place the downloaded files inside it. Check that these files exist:
+
+```text
+data/ekt/products.csv
+data/index/catalog-index.zip
+```
+
+After installing dependencies as in [Reviewer quick start](#reviewer-quick-start), run:
+
+```bash
+cp .env.example .env
+# Set OPENAI_API_KEY in .env; keep EMBED_MODEL=text-embedding-3-small.
+python main.py
+```
+
+Open [http://localhost:8000](http://localhost:8000) and check `GET /api/ready` for HTTP 200 and 15,037 products. Search for article `151100015_` to check the catalog. The package already includes vectors, so do not run `download_ekt.py` or `python -m app.index_build` for this review path. The CSV is provided for inspection; the running app reads `catalog-index.zip` directly, so do not extract that inner file. Chat and natural-language searches still call the configured OpenAI API. If the embedding model or text template changes, download a fresh catalog snapshot and rebuild the index.
+
+## Run with a downloaded catalog
 
 ```bash
 cp .env.example .env
@@ -34,31 +62,15 @@ Run these commands after installing dependencies as above. Open [http://localhos
 
 The downloader resumes interrupted raw-response downloads. Existing CSV rows do not count as complete: run the downloader once to backfill the full API data. Use `python download_ekt.py --new` for a fresh snapshot. Change `EMBED_MODEL` only if you also rebuild the index. Set `CHAT_MODEL` to a model available to your API account.
 
-## Run with Docker Compose
-
-This is a repeatable deployment path for a host with Docker Compose. Copy the repository and create a `.env` file as above, then run:
-
-```bash
-docker compose build
-docker compose run --rm app python download_ekt.py
-docker compose run --rm app python -m app.index_build
-docker compose up -d
-curl -f http://localhost:8000/api/ready
-```
-
-Open `http://localhost:8000` on the Docker host, or set `PORT` in your shell before `docker compose up` to change the local port. Compose binds to loopback so traffic reaches a public deployment through your reverse proxy. It keeps the downloaded catalog, embedding cache, and active index in the `catalog_data` volume, so rebuilding the image does not erase them. Run one app worker: sessions and carts are stored in process memory. To update the snapshot, rerun the download and index commands, then check `/api/ready`.
-
-For a public URL, put the app behind an HTTPS reverse proxy, forward the original host and scheme, and set `SECURE_COOKIES=1` in `.env` before restarting. Keep the API keys and catalog volume on the server. The app needs persistent storage at `/app/data`; an ephemeral container filesystem loses the catalog on restart. Do not send payment details through the demo.
-
 ## Five-minute review flow
 
-1. Ask for an article, product name, or description, such as “Автоматический выключатель 16 А”.
-2. Use **Выбрать** on two available products. Both stay in the selection while you search or refresh. Edit quantities if needed.
-3. Click **Проверить и добавить выбранные**, then decline the proposal; the cart should remain empty.
-4. Prepare the selection again, confirm with **Добавить в корзину** or “да, добавь”, then open `/cart`.
-5. Refresh the cart: confirmed items remain in the same browser session.
+1. Run the key-free test command above. It checks the cart and confirmation flow with products that have confirmed purchase rules.
+2. With a prepared catalog and API key, search for article `151100015_` or ask for “Автоматический выключатель 16 А”. Open a product card to inspect its source, price, stock and technical details.
+3. Try **Показать аналоги** or ask about delivery terms. The assistant should distinguish known facts from information that needs supplier confirmation.
 
-Exact article matches avoid an embedding call. Natural-language searches use the local embedding index. The model can search and prepare a proposal, but only the server's confirmation handler changes the cart. A proposal expires after 10 minutes; prices and quantities are checked again on confirmation.
+The current 15,037-product EKT snapshot has no confirmed minimum quantity or purchase increment for any product. Selection and cart addition are therefore blocked in the live catalog; the app shows the missing rule instead of guessing it. The cart flow is covered by tests using clearly synthetic products with confirmed rules. A new EKT snapshot will enable live selection only if those fields become available.
+
+Exact article matches avoid an embedding call. Natural-language searches use the local embedding index. When purchase rules are confirmed, the model can prepare a proposal, but only the server's confirmation handler changes the cart. A proposal expires after 10 minutes; prices and quantities are checked again on confirmation.
 
 The product card's quantity control uses server-calculated minimum, multiple, and remaining stock. Missing requested technical specifications are marked for clarification. Monetary API values are decimal strings; the displayed price and totals come from server-formatted labels.
 
@@ -83,7 +95,7 @@ After a raw archive is published, the index builder reads only that archive and 
 python -m pytest -q
 ```
 
-The tests cover search, index publication, model tool restrictions, cart proposals and confirmation, stock checks, session ownership, concurrent or duplicate confirmation, and API behavior. They mock external services.
+The tests cover search, index publication, model tool restrictions, cart proposals and confirmation, stock checks, document reconciliation, row completion, unit mismatches, request recovery, session ownership, concurrent or duplicate confirmation, and API behavior. They mock external services. Frontend workflow regressions run with `node --test tests/frontend_workflows.cjs`.
 
 There is no login. An anonymous cookie connects chat and cart, and a server restart clears those sessions. Localhost ports use separate session cookies so simultaneous demos do not interfere. Catalog prices and stock are snapshot values. Missing price or stock prevents additions. See [acceptance results](ACCEPTANCE.md) for real-provider/browser checks, measured latency and source-data limitations.
 
@@ -91,9 +103,13 @@ There is no login. An anonymous cookie connects chat and cart, and a server rest
 
 - Payment and delivery answers use `app/policies.json`, verified against [EKT's published information](https://ekt.kz/about/information/) on 2026-09-23. Overlapping Алматы delivery thresholds are reported for supplier confirmation. The demo does not accept payment.
 - Alternatives compare technical families and electrical/mechanical attributes. Conflicting known attributes exclude candidates; missing compatibility information stays visible. These comparisons do not certify suitability for an installation.
-- Upload JPEG, PDF, DOC/DOCX, XLS/XLSX or CSV: at most five files, 10 MB per file and 20 MB total. Spreadsheets/CSV are limited to 1,000 rows per sheet; split larger inputs. PDF is limited to 100 pages. Encrypted, corrupt and inconsistent file types are rejected before model submission. Office embedded images require PDF export or separate images.
-- Review extracted rows, source references and quantities. Exact, ambiguous and unresolved matches have distinct statuses. Check the desired rows and prepare a batch of at most 50. Every batch requires fresh button or text confirmation.
-- Uploaded bytes are forwarded to the configured model provider with `store=False`; the application does not save those bytes or log file contents. Session memory retains conversation text and extracted review information. This does not override the provider's retention policy. Failed processing keeps the browser draft for retry. Do not upload payment details or confidential documents.
+- Upload JPEG, PDF, DOC/DOCX, XLS/XLSX or CSV: at most five files, 10 MB per file and 20 MB total. Spreadsheets/CSV support up to 1,000 rows per sheet and 20,000 reviewed rows per session. Supported tables are automatically processed in bounded chunks. PDF is limited to 100 pages. Encrypted, corrupt and inconsistent file types are rejected before model submission. Office embedded images require PDF export or separate images.
+- Table review reconciles every nonempty data row. Source references and requested units remain visible; duplicate products aggregate distinct row contributions. Correct articles or units, search alternatives, or exclude rows with a reason inline. Select all ready rows and confirm successive batches of at most 50. Confirmed rows are excluded from later batches unless explicitly reopened. PDF, Word and image extraction remains model-assisted and requires a manual completeness check.
+- XLS/XLSX/CSV are parsed locally; other uploaded bytes are forwarded to the configured model provider with `store=False`; the application does not save those bytes or log file contents. Session memory retains conversation text and extracted review information. This does not override the provider's retention policy. Failed processing keeps the browser draft for retry. Do not upload payment details or confidential documents.
+
+The compact selection tray preserves browsing position. A product can go directly from quantity entry to a server-owned confirmation. Expired proposals can be renewed in one click. Catalog search offers stock and price controls, real pagination and comparison of two or three products.
+
+Composer text, quantities and document review edits survive refresh within the same browser tab. Refresh reconnects to active work; existing products remain reviewable while a response runs. A second upload adds to the current review, and starting a new chat asks before discarding unfinished work. Server sessions remain in memory; this does not provide durable saved procurement work.
 
 ## Data provenance and refresh
 
@@ -118,11 +134,11 @@ Configure `EKT_API_USER` and `EKT_API_PASSWORD` through the environment or ignor
 
 ## Embedding text and retrieval checks
 
-The active vectors are `data/index/<version>/embeddings.npy`, with product records and checksummed metadata alongside them. `current.json` selects the version; `embedding-cache.sqlite3` reuses vectors for identical model/token inputs. Query vectors use a bounded in-process cache. Docker keeps the catalog and index in `catalog_data`.
+The active vectors are `data/index/<version>/embeddings.npy`, with product records and checksummed metadata alongside them. `current.json` selects the version; `embedding-cache.sqlite3` reuses vectors for identical model/token inputs. The Kaggle package combines the active vectors, product records and metadata in `data/index/catalog-index.zip`, which the app reads directly when no `current.json` is present. Query vectors use a bounded in-process cache.
 
 `app/embedding_text.py` owns an explicit allowlist of readable identity and technical fields, independently of UI labels. It omits stock, supplier lead times, price-display flags, media IDs, barcodes, promotional category paths and unknown properties. Original fields remain in product metadata. Stable fields are sorted, HTML is removed, and descriptions come last. Each product uses at most 8,192 tokens; requests contain at most 64 inputs and 300,000 tokens. Overlong search queries are rejected instead of silently losing customer requirements.
 
-Increment `EMBEDDING_TEMPLATE_VERSION` when changing field selection, labels, cleanup, ordering or truncation, then rebuild before starting the updated app. An index with an absent or different template version is rejected. Index builds reuse cached vectors and only replace the active pointer after successful validation. The Docker image and CI cache the tokenizer vocabulary during setup, so first-use tokenization needs no download there.
+Increment `EMBEDDING_TEMPLATE_VERSION` when changing field selection, labels, cleanup, ordering or truncation, then rebuild before starting the updated app. An index with an absent or different template version is rejected. Index builds reuse cached vectors and only replace the active pointer after successful validation. CI caches the tokenizer vocabulary during setup, so first-use tokenization needs no download there.
 
 Run the labeled Russian retrieval regression independently of the chat model:
 

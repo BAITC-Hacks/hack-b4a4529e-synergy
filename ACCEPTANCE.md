@@ -1,5 +1,15 @@
 # EKT prototype acceptance — 2026-09-23
 
+## Core workflow audit implementation — 2026-09-23
+
+Scope follows the requested priority reduction: core findings 1–11; production checkout, export/enquiry, durable storage, location-aware fulfilment and the full partial-batch-error workflow (12–16) are deferred.
+
+- **174 Python tests and 4 frontend workflow tests passed**; JavaScript syntax and diff checks passed. Regression coverage now includes distinct duplicate rows and idempotent preparation, source-unit mismatch/missing units, explicit reopen after confirmation, inline article/unit correction, exclusion, successive 50-row batches, 600-row CSV reconciliation, multi-sheet XLSX, second-file append, request status after refresh, cancellation isolation, compound consultation, catalog pagination and comparison. Frontend regressions run with `node --test tests/frontend_workflows.cjs`.
+- Desktop browser checks used isolated synthetic products with confirmed purchase rules. A four-row CSV produced a five-piece line from quantities 2 + 3, displayed both source references, and marked the three confirmed source rows added. Only the unresolved row remained unfinished. Inline correction resolved its mistyped article without reuploading.
+- Browser checks also covered direct single-product preparation, comparison across separate catalog searches, the new-chat discard guard, and composer draft recovery after navigation. Mobile confirmation was visually checked at 390 × 844; the quantity, total, confirmation and compact selection tray remained readable. Keyboard Tab reaches product selection after quantity entry; Escape cancels the new-chat dialog without discarding work.
+- A six-second proposal fixture exposed “Обновить предложение” after expiry and renewed successfully. During a delayed response, product quantity editing and local selection remained available. Refresh restored the running status, automatically displayed the completed answer and retained the local quantity of 3. The recovered page reported no browser errors.
+- Structured tables no longer invoke the conversation model for extraction. No new real-provider latency percentile was measured. PDF/Word/image completeness still needs human review. Anonymous sessions remain in memory and are not durable saved work. The stricter source-data purchase gates below remain in force.
+
 ## Purchase-unit and quantity-rule verification — 2026-09-23
 
 - **157 automated tests passed**, including 17 purchase-rule regression cases; JavaScript syntax and diff checks passed. Test purchase fixtures now explicitly supply confirmed units, minimums and increments.
@@ -62,7 +72,7 @@ The earlier prototype acceptance below remains a historical record of its origin
 - **Passed:** desktop chat → proposal → keyboard refusal → fresh proposal → keyboard button confirmation → cart navigation → refresh.
 - **Passed:** mobile 390×844 chat → fresh proposal → Enter-submitted text confirmation → cart → refresh. Chat and cart had `scrollWidth == innerWidth == 390`; the cart screenshot was visually inspected.
 - **Passed:** attachment review → explicit row checkbox → batch proposal → cancellation/confirmation, privacy dialog keyboard closing, certificate links, purchase-term source links and failed-upload draft retention.
-- **Passed:** 89 automated tests in the working environment (1.53 seconds) and the freshly created virtual environment (1.49 seconds). Clean dependency installation succeeded; `pip check` reported no broken requirements. Tests do not need catalog credentials or model access. Docker/public HTTPS deployment was not independently exercised in this acceptance run.
+- **Passed:** 89 automated tests in the working environment (1.53 seconds) and the freshly created virtual environment (1.49 seconds). Clean dependency installation succeeded; `pip check` reported no broken requirements. Tests do not need catalog credentials or model access. Public HTTPS deployment was not independently exercised in this acceptance run.
 - **Passed:** readiness reports the active version and product count; unavailable-index behavior is covered by API tests. Timing records use route templates, status and duration, without message text or uploaded data. Raw uploads are not retained in session history; extracted review data and messages remain in anonymous session memory until expiry/restart. Provider retention is governed separately by the provider.
 
 ## Live reliability and latency

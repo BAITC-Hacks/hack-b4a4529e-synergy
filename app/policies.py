@@ -34,7 +34,7 @@ def get_purchase_terms(topic="all", city=None, buyer_type=None, product=None):
                                        ("id", "article", "unit", "unit_known", "min_quantity", "quantity_step", "purchase_rule_note")}
             result["product_rules"]["purchase_rule_note"] = purchase_rule_issue(product) or product.get("purchase_rule_note") or ""
             if product.get("min_quantity") is None:
-                result["minimum"] += " Минимальная партия этого товара не подтверждена в источнике."
+                result["minimum"] += " Минимальную партию этого товара уточните у поставщика."
             if product.get("url"):
                 result["sources"].append({"title": "Условия выбранного товара", "url": product["url"]})
         elif topic == "minimum":

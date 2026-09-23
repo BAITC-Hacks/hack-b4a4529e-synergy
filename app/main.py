@@ -101,6 +101,12 @@ def api_state(request: Request):
     return _response(request, state_payload(session), session)
 
 
+def _request_failure(session, token, message, error):
+    with session.lock:
+        if session.active_request == token:
+            session.request_status = {"id": token, "stage": "failed", "error": error, "message": message}
+
+
 def _chat(session, message, attachments, proposal_id, request_id=None, chat_id=None):
     if not session.lock.acquire(blocking=False):
         return {"error": "Дождитесь предыдущего ответа."}, 409
@@ -124,6 +130,8 @@ def _chat(session, message, attachments, proposal_id, request_id=None, chat_id=N
         from .agent import run_turn
         attachments = [validate_attachment(f["filename"], f["mime"], f["data"]) for f in attachments]
         with session.lock:
+            if session.active_request != token:
+                return {"error": "Ответ остановлен."}, 409
             session.request_status["stage"] = "reading" if attachments else "searching"
         result = run_turn(working, message, attachments, proposal_id)
         with session.lock:
@@ -136,14 +144,14 @@ def _chat(session, message, attachments, proposal_id, request_id=None, chat_id=N
             session.request_status = {"id": token, "stage": "complete"}
             return {**result, **state_payload(session)}, 200
     except AttachmentError as exc:
-        session.request_status = {"id": token, "stage": "failed", "error": str(exc), "message": message}
+        _request_failure(session, token, message, str(exc))
         return {"error": str(exc)}, 422
     except (CatalogUnavailable, FileNotFoundError):
-        session.request_status = {"id": token, "stage": "failed", "error": "Каталог временно недоступен.", "message": message}
+        _request_failure(session, token, message, "Каталог временно недоступен.")
         logger.warning("catalog unavailable during chat")
         return {"error": "Каталог временно недоступен. Попробуйте позже."}, 503
     except (APIError, RuntimeError, ValueError) as exc:
-        session.request_status = {"id": token, "stage": "failed", "error": "Не удалось получить ответ. Повторите запрос.", "message": message}
+        _request_failure(session, token, message, "Не удалось получить ответ. Повторите запрос.")
         # Do not expose upstream request contents, credentials or stack traces.
         logger.warning("chat failure type=%s", type(exc).__name__)
         return {"error": "Не удалось получить ответ. Попробуйте ещё раз."}, 502
@@ -158,7 +166,7 @@ def _chat(session, message, attachments, proposal_id, request_id=None, chat_id=N
 async def api_chat(request: Request):
     session = _session(request)
     if not _authorized(request, session):
-        return _response(request, {"error": "Обновите страницу: сессия не подтверждена."}, session, 403)
+        return _response(request, {"error": "Обновите страницу и попробуйте снова."}, session, 403)
     attachments = []
     async with request.form(max_files=MAX_FILES, max_fields=10, max_part_size=MAX_UPLOAD_BYTES) as form:
         message = str(form.get("message") or "").strip()
@@ -333,7 +341,7 @@ def _propose_items(session, items):
 async def api_propose(request: Request, action: ProductAction):
     session = _session(request)
     if not _authorized(request, session):
-        return _response(request, {"error": "Обновите страницу: сессия не подтверждена."}, session, 403)
+        return _response(request, {"error": "Обновите страницу и попробуйте снова."}, session, 403)
     payload, status = await run_in_threadpool(_propose_product, session, action.product_id, action.quantity)
     return _response(request, payload, session, status)
 
@@ -342,7 +350,7 @@ async def api_propose(request: Request, action: ProductAction):
 async def api_propose_items(request: Request, action: SelectionAction):
     session = _session(request)
     if not _authorized(request, session):
-        return _response(request, {"error": "Обновите страницу: сессия не подтверждена."}, session, 403)
+        return _response(request, {"error": "Обновите страницу и попробуйте снова."}, session, 403)
     payload, status = await run_in_threadpool(_propose_items, session, [item.model_dump() for item in action.items])
     return _response(request, payload, session, status)
 
@@ -365,7 +373,7 @@ def _change_cart(session, proposal_id, confirm):
         return {**state_payload(session), **result}, 200 if result.get("ok") else 409
     except (CatalogUnavailable, FileNotFoundError):
         logger.exception("catalog unavailable during confirmation")
-        return {"error": "Индекс каталога недоступен."}, 503
+        return {"error": "Поиск сейчас недоступен. Попробуйте позже."}, 503
     finally:
         session.lock.release()
 
@@ -373,7 +381,7 @@ def _change_cart(session, proposal_id, confirm):
 async def _action(request, action, confirm):
     session = _session(request)
     if not _authorized(request, session):
-        return _response(request, {"error": "Обновите страницу: сессия не подтверждена."}, session, 403)
+        return _response(request, {"error": "Обновите страницу и попробуйте снова."}, session, 403)
     payload, status = await run_in_threadpool(_change_cart, session, action.proposal_id, confirm)
     return _response(request, payload, session, status)
 
@@ -392,7 +400,7 @@ async def api_cancel(request: Request, action: ProposalAction):
 def api_remove(request: Request, action: RemoveAction):
     session = _session(request)
     if not _authorized(request, session):
-        return _response(request, {"error": "Обновите страницу: сессия не подтверждена."}, session, 403)
+        return _response(request, {"error": "Обновите страницу и попробуйте снова."}, session, 403)
     result = remove_cart_line(session, action.line_id)
     return _response(request, result, session, 200 if result["ok"] else 409)
 
@@ -431,10 +439,13 @@ def api_review(request: Request, row_id: str, action: ReviewAction):
                 row.pop("added", None)
                 row.pop("exclude_reason", None)
             elif action.action == "alternatives":
+                from .cart import purchase_options
                 source = index.get(row["candidate_product_ids"][0]) if row["candidate_product_ids"] else None
                 if not source:
                     return _response(request, {"error": "Сначала найдите исходный товар по артикулу."}, session, 409)
                 candidates = _analogs_for(index, source, 5)
+                for candidate in candidates:
+                    candidate["purchase_options"] = purchase_options(session, index.get(candidate["id"]))
                 row.update(candidates=candidates, candidate_product_ids=[p["id"] for p in candidates], status="ambiguous", completion="unresolved")
             else:
                 updated = {**row, "query": action.query.strip() or row["query"],

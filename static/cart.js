@@ -4,6 +4,11 @@ function money(value) {
 }
 
 let csrf = "";
+let cartChat = "";
+let selectionInputs = [];
+let proposalTimer;
+const quantityDrafts = new Map();
+function saveQuantityDrafts() { try { sessionStorage.setItem("ekt-cart-draft", JSON.stringify({chat:cartChat, values:[...quantityDrafts]})); } catch {} }
 
 function renderCart(cart) {
   const empty = document.getElementById("empty-cart");
@@ -33,7 +38,8 @@ function renderCart(cart) {
     qty.dataset.label = "Количество";
     const quantity = document.createElement("input");
     quantity.type = "number"; quantity.min = "0.000001"; quantity.step = "any";
-    quantity.className = "quantity-input"; quantity.value = item.quantity;
+    quantity.className = "quantity-input"; quantity.value = quantityDrafts.get(item.line_id) ?? item.quantity;
+    quantity.addEventListener("input", () => {quantityDrafts.set(item.line_id, quantity.value);saveQuantityDrafts();});
     quantity.setAttribute("aria-label", "Количество в корзине для " + item.name);
     const save = document.createElement("button");
     save.type = "button"; save.className = "text-button"; save.textContent = "Сохранить";
@@ -66,9 +72,18 @@ function renderCart(cart) {
 }
 
 function renderProposal(proposal) {
+  clearTimeout(proposalTimer);
   const section = document.getElementById("cart-proposal");
-  section.replaceChildren(); section.hidden = !proposal;
-  if (!proposal) return;
+  section.replaceChildren(); section.hidden = !proposal && !selectionInputs.length;
+  if (!proposal || proposal.expires_at * 1000 <= Date.now()) {
+    if(selectionInputs.length){
+      const renew=document.createElement("button");renew.type="button";renew.className="primary";renew.textContent="Обновить предложение";
+      renew.addEventListener("click",()=>cartRequest("/api/cart/propose-items",{items:selectionInputs}));
+      const note=document.createElement("p");note.textContent="Выбор сохранён. Проверьте актуальную стоимость перед подтверждением.";section.append(note,renew);
+    }
+    return;
+  }
+  proposalTimer=setTimeout(()=>renderProposal(null),Math.max(1,proposal.expires_at*1000-Date.now()));
   const heading = document.createElement("h2"); heading.textContent = "Подтвердите добавление";
   const note = document.createElement("p"); note.textContent = "Текущее количество ещё не изменилось. Будет добавлено:";
   section.append(heading, note);
@@ -98,6 +113,10 @@ async function cartRequest(url, body) {
   try {
     const response = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf}, body: JSON.stringify(body)});
     const data = await response.json();
+    if (response.ok && body.line_id) quantityDrafts.delete(body.line_id);
+    if (response.ok && ["added","already_added"].includes(data.status)) quantityDrafts.clear();
+    if (data.selection_inputs) selectionInputs = data.selection_inputs;
+    saveQuantityDrafts();
     if (data.cart) { renderCart(data.cart); renderProposal(data.proposal); }
     showStatus(!response.ok ? data.error || "Не удалось изменить количество." : data.proposal
       ? "Проверьте дополнительное количество и подтвердите добавление." : data.status === "cancelled"
@@ -119,6 +138,7 @@ function showStatus(message) {
 
 async function removeLine(lineId) {
   if (!lineId || updating) return;
+  updating = true;
   document.querySelectorAll(".remove-line").forEach(button => { button.disabled = true; });
   showStatus("Убираем товар…");
   try {
@@ -129,11 +149,12 @@ async function removeLine(lineId) {
     const data = await res.json();
     if (!res.ok) { showStatus(data.error || "Не удалось убрать товар. Повторите действие."); return; }
     renderCart(data.cart);
+    quantityDrafts.delete(lineId); saveQuantityDrafts(); selectionInputs = [];
     renderProposal(null);
     showStatus("Товар убран из корзины.");
     (document.querySelector(".remove-line") || document.querySelector("#empty-cart .cart-return")).focus();
-  } catch { showStatus("Нет связи. Товар остался в корзине. Повторите действие."); }
-  finally { document.querySelectorAll(".remove-line").forEach(button => { button.disabled = false; }); }
+  } catch { showStatus("Связь прервалась. Обновите корзину, чтобы проверить результат удаления."); }
+  finally { updating=false;document.querySelectorAll(".remove-line").forEach(button => { button.disabled = false; }); }
 }
 
 async function boot() {
@@ -141,6 +162,9 @@ async function boot() {
   if (!res.ok) throw new Error();
   const data = await res.json();
   csrf = data.csrf_token;
+  cartChat = data.chat_id;
+  try {const saved=JSON.parse(sessionStorage.getItem("ekt-cart-draft"));if(saved?.chat===cartChat)for(const [key,value] of saved.values)quantityDrafts.set(key,value);}catch{}
+  selectionInputs = data.selection_inputs || [];
   renderCart(data.cart || { items: [], count: 0, total: 0 });
   renderProposal(data.proposal);
 }

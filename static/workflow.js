@@ -12,7 +12,7 @@ const Workflow = {
   },
   eligible(row, product, quantity) {
     return !["added", "excluded"].includes(row.completion) && product?.purchase_options?.can_add
-      && Number(quantity) > 0 && (!row.source_unit || this.unit(row.source_unit) === this.unit(product.unit));
+      && Number(quantity) > 0 && Number(quantity) <= Number(product.purchase_options.remaining) && Boolean(row.source_unit) && this.unit(row.source_unit) === this.unit(product.unit);
   }
 };
 if (typeof module !== "undefined") module.exports = Workflow;

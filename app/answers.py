@@ -80,8 +80,10 @@ def terms_answer(terms):
     if rules:
         for key, label in (("min_quantity", "Минимальная партия"), ("quantity_step", "Кратность")):
             if rules.get(key) is not None:
-                unit = rules.get("unit") if rules.get("unit_known") else "(единица продажи не подтверждена)"
-                lines.append(f"{label}: {rules[key]} {unit}.")
+                if rules.get("unit_known"):
+                    lines.append(f"{label}: {rules[key]} {rules['unit']}.")
+                else:
+                    lines.append(f"{label}: {rules[key]}; единицу продажи уточните у поставщика.")
         if rules.get("purchase_rule_note"):
             lines.append(rules["purchase_rule_note"])
     lines.extend(terms.get("clarifications", []))

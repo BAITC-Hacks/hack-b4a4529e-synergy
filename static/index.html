@@ -3,18 +3,17 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Консультант Электрокомплект</title>
+    <title>Подбор товаров</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <div class="desk">
       <header class="mast">
-        <a class="mark" href="/" aria-label="На главную">ЭК</a>
-        <div class="mast-copy">
-          <p class="kicker">Электрокомплект</p>
-          <h1>Подбор товаров</h1>
-        </div>
-        <button type="button" id="new-chat" class="ghost" disabled>Новый чат</button>
+        <h1 class="mast-title">Подбор товаров</h1>
+        <button type="button" id="new-chat" class="new-chat" disabled>
+          <svg aria-hidden="true" viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M10 4v12M4 10h12" /></svg>
+          Новый чат
+        </button>
         <a class="bin" href="/cart">
           Корзина
           <span id="cart-count">0</span>
@@ -29,7 +28,11 @@
           <label><input id="catalog-stock" type="checkbox" /> Есть в наличии</label>
           <button class="ghost" type="submit">Найти</button>
         </form>
-        <button class="ghost" type="button" id="compare-products" disabled>Сравнить (0/3)</button>
+        <div class="compare-actions">
+          <button class="ghost" type="button" id="compare-products" aria-describedby="compare-hint" disabled>Сравнить (0/3)</button>
+          <p id="compare-hint" class="compare-hint" aria-live="polite">Найдите товары, затем отметьте «Сравнить» у 2–3 карточек в результатах ниже.</p>
+        </div>
+        <p id="catalog-status" class="article" role="status" hidden></p>
       </details>
 
       <main id="log" class="log" aria-label="Переписка">
@@ -83,19 +86,19 @@
       </form>
       <div class="composer-footnote">
         <p>Демо · без оформления заказа</p>
-        <button type="button" class="text-button" id="open-info">О данных и файлах</button>
+        <button type="button" class="text-button" id="open-info">Важная информация</button>
       </div>
       </div>
       <dialog id="info-dialog" class="info-dialog" aria-labelledby="info-title">
         <form method="dialog"><button class="dialog-close" aria-label="Закрыть">×</button></form>
-        <h2 id="info-title">О данных и файлах</h2>
+        <h2 id="info-title">Важная информация</h2>
         <h3>Демонстрационный каталог</h3>
-        <p>Цены и остатки взяты из снимка каталога. Актуальные данные нужно уточнить у поставщика. Корзина не оформляет заказ и не резервирует товар.</p>
+        <p>Цены и наличие могут измениться. Уточните актуальные условия у поставщика. Корзина не оформляет заказ и не резервирует товар.</p>
         <h3>Фото и спецификации</h3>
         <p>До 5 файлов: 10 МБ каждый, 20 МБ всего. Поддерживаются фото, PDF, Word, Excel и CSV. В Excel и CSV — до 1000 строк на лист.</p>
         <p>Изображения внутри Word или Excel приложите отдельно как PDF или фото.</p>
-        <h3>Обработка данных</h3>
-        <p>Таблицы разбираются на сервере; остальные файлы обрабатываются AI-провайдером. Исходные файлы не сохраняются. Чат, разбор и корзина хранятся в анонимной сессии до двух часов без активности или перезапуска сервера. Не отправляйте платёжные данные.</p>
+        <h3>Как используются ваши файлы</h3>
+        <p>Таблицы обрабатываются в приложении, остальные файлы — с помощью сервиса ИИ. Исходные файлы не сохраняются. Переписка, результаты обработки и корзина хранятся до двух часов без активности и могут удалиться раньше при перезапуске приложения. Не отправляйте платёжные данные.</p>
       </dialog>
       <dialog id="new-chat-dialog" class="info-dialog" aria-labelledby="new-chat-title">
         <h2 id="new-chat-title">Начать новый подбор?</h2>

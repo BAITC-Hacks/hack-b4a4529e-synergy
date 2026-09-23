@@ -5,7 +5,7 @@ from .search import article_query, exact_matches, search_products, product_hit, 
 from .units import unit_key
 
 
-def review_items(session, items, index, filenames, *, local_only=False):
+def review_items(session, items, index, filenames, *, local_only=False, match_cache=None):
     """Resolve extracted rows; the model never supplies authoritative product facts."""
     if not isinstance(items, list) or not 1 <= len(items) <= 100:
         raise ValueError("Передайте от 1 до 100 строк спецификации за один вызов.")
@@ -29,7 +29,7 @@ def review_items(session, items, index, filenames, *, local_only=False):
         document_id = str(item.get("document_id") or filename)
         row_id = hashlib.sha256((document_id + "\0" + reference).encode()).hexdigest()[:24]
         old = next((row for row in session.attachment_review if row.get("row_id") == row_id), None)
-        if old and old.get("completion") == "added":
+        if old and old.get("completion") in {"added", "excluded"}:
             reviewed.append(old)
             continue
         exact = exact_matches(index, query)
@@ -38,6 +38,8 @@ def review_items(session, items, index, filenames, *, local_only=False):
             candidates = [product_hit(p) for p in exact[:5]]
         elif is_article or not query:
             candidates = []
+        elif local_only and match_cache is not None and query in match_cache:
+            candidates = [dict(p) for p in match_cache[query]]
         elif local_only:
             tokens = set(re.findall(r"[\w]+", query.casefold()))
             ranked = sorted(((len(tokens & set(re.findall(r"[\w]+", p["name"].casefold()))), p["id"], p)
@@ -47,13 +49,15 @@ def review_items(session, items, index, filenames, *, local_only=False):
         else:
             candidates = search_products(query, 5, index=index)["results"]
         candidates = [p for p in candidates if not p.get("analog_of")]
+        if local_only and match_cache is not None:
+            match_cache[query] = [dict(p) for p in candidates]
         status = "unresolved" if not candidates else "ambiguous"
         if len(exact) == 1:
             status = "resolved" if quantity is not None else "quantity_required"
         source_unit = str(item.get("source_unit") or "").strip()[:40]
         for candidate in candidates:
             candidate["purchase_options"] = purchase_options(session, index.get(candidate["id"]))
-        ready = len(exact) == 1 and quantity is not None and candidates[0]["purchase_options"]["can_add"]
+        ready = bool(source_unit) and len(exact) == 1 and quantity is not None and candidates[0]["purchase_options"]["can_add"]
         if ready and source_unit:
             ready = unit_key(source_unit) == unit_key(candidates[0]["unit"])
         reviewed.append({"row_id": row_id, "document_id": document_id,
@@ -62,10 +66,9 @@ def review_items(session, items, index, filenames, *, local_only=False):
                          "filename": filename, "source_reference": reference, "query": query,
                          "quantity": quantity, "candidate_product_ids": [p["id"] for p in candidates],
                          "candidates": candidates, "status": status})
-    combined = list(session.attachment_review)
-    for row in reviewed:
-        combined = [old for old in combined if old.get("row_id") != row["row_id"]]
-        combined.append(row)
+    by_id = {row["row_id"]: row for row in session.attachment_review}
+    by_id.update({row["row_id"]: row for row in reviewed})
+    combined = list(by_id.values())
     if len(combined) > 20000:
         raise ValueError("В одном подборе поддерживается до 20 000 строк. Сохраните список и начните новый подбор.")
     session.attachment_review = combined
