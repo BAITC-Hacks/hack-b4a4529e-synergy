@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.cart import Session, cart_view, confirm_pending, propose_cart, propose_add_to_cart, remove_cart_line, user_confirms_add
+from app.cart import Session, cart_view, confirm_pending, propose_cart, propose_add_to_cart, purchase_options, remove_cart_line, user_confirms_add
 from tests.helpers import sample_products
 
 
@@ -97,6 +97,43 @@ def test_duplicate_lines_and_documented_units():
     assert not propose_add_to_cart(session, item, .25)["ok"]
     result = propose_cart(session, [{"product_id": 101, "quantity": 1.5}, {"product_id": 101, "quantity": 1.5}], lambda _: item)
     assert result["ok"] and result["proposal"]["items"][0]["quantity"] == 3
+
+
+def test_purchase_options_respect_minimum_step_and_existing_cart():
+    item = product(quantity=8, min_quantity=5, quantity_step=2)
+    session = Session(id="test")
+    initial = purchase_options(session, item)
+    assert initial["suggested_quantity"] == "6"
+    assert initial["step"] == "2"
+    assert initial["can_add"]
+    pid = propose_add_to_cart(session, item, 6)["proposal"]["id"]
+    confirm_pending(session, lambda _: item, pid)
+    further = purchase_options(session, item)
+    assert further["suggested_quantity"] == "2"
+    assert further["remaining"] == "2"
+    assert further["can_add"]
+    assert not propose_add_to_cart(session, item, 1)["ok"]
+
+
+def test_out_of_stock_does_not_claim_stock_is_in_empty_cart():
+    options = purchase_options(Session("empty"), product(quantity=0))
+    assert not options["can_add"]
+    assert "Нет в наличии" in options["reason"]
+    assert "корзине" not in options["reason"]
+
+
+def test_fractional_price_uses_decimal_source_value(tmp_path):
+    from app.catalog import load_products
+    import json
+
+    raw = product(price="0.29")
+    (tmp_path / "products.json").write_text(json.dumps([raw]), encoding="utf-8")
+    item = load_products(tmp_path)[0]
+    assert item["price"] == "0.29"
+    session = Session(id="test")
+    pid = propose_add_to_cart(session, item, 3)["proposal"]["id"]
+    result = confirm_pending(session, lambda _: item, pid)
+    assert result["cart"]["total"] == "0.87"
 
 
 def test_remove_one_confirmed_line_invalidates_pending():

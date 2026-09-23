@@ -103,11 +103,26 @@ def test_chat_missing_index_has_safe_error(monkeypatch):
     import app.agent as agent
     client, _ = client_and_session()
     def unavailable():
-        raise FileNotFoundError()
+        from app.search import CatalogUnavailable
+        raise CatalogUnavailable()
     monkeypatch.setattr(agent, "get_index", unavailable)
     result = client.post("/api/chat", data={"message": "лампа"})
     assert result.status_code == 503
     assert "Каталог временно недоступен" in result.json()["error"]
+
+
+def test_local_demo_ports_do_not_share_session_cookie():
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    first = TestClient(app, base_url="http://localhost:8765")
+    second = TestClient(app, base_url="http://localhost:8766")
+    first.get("/api/state")
+    second.cookies.update(first.cookies)
+    second.get("/api/state")
+    assert first.cookies.get("sid_8765")
+    assert second.cookies.get("sid_8766")
+    assert first.cookies.get("sid_8765") != second.cookies.get("sid_8766")
 
 
 def test_empty_and_unsupported_upload():

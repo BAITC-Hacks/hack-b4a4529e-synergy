@@ -11,36 +11,47 @@
       <header class="mast">
         <a class="mark" href="/" aria-label="Назад в чат">ЭК</a>
         <div class="mast-copy">
-          <p class="kicker">Электрокомплект · ekt.kz</p>
-          <h1>Корзина</h1>
+          <p class="kicker">Электрокомплект</p>
+          <p class="mast-title">Подбор товаров</p>
         </div>
-        <a class="bin" href="/">К консультанту</a>
+        <a class="bin" href="/">Назад к подбору</a>
       </header>
 
       <main class="cart-page">
-        <div id="empty-cart" class="empty-cart">
+        <header class="cart-heading">
+          <h1>Ваша корзина</h1>
+          <p id="cart-caption">Загружаем выбранные товары…</p>
+        </header>
+        <div id="empty-cart" class="empty-cart" hidden>
           <h2>Корзина пока пуста</h2>
-          <p>Найдите товар в каталоге и подтвердите добавление в чате.</p>
-          <a class="cart-return" href="/">Найти товар</a>
+          <p>Начните с названия товара или артикула.<br />Поможем найти нужное и сравнить варианты.</p>
+          <a class="cart-return" href="/">Перейти к подбору</a>
         </div>
+        <div class="cart-layout" id="cart-content" hidden>
         <div class="cart-scroll">
         <table class="sheet" id="sheet" hidden>
+          <caption class="sr-only">Выбранные товары, количество и стоимость</caption>
           <thead>
             <tr>
-              <th>Позиция</th>
-              <th>Артикул</th>
-              <th>Кол-во</th>
-              <th>Цена</th>
-              <th>Сумма</th>
+              <th scope="col">Товар</th>
+              <th scope="col">Количество</th>
+              <th scope="col">Цена</th>
+              <th scope="col">Сумма</th>
               <th><span class="sr-only">Действие</span></th>
             </tr>
           </thead>
           <tbody id="rows"></tbody>
         </table>
         </div>
-        <p class="grand" id="grand" hidden></p>
+        <aside class="cart-summary" aria-label="Итого по корзине">
+          <h2>Итого</h2>
+          <p class="grand" id="grand" hidden></p>
+          <p class="summary-note">Демонстрационная корзина.<br />Заказ не оформляется, товар не резервируется.</p>
+          <a class="cart-return" href="/">Продолжить подбор</a>
+          <p class="snapshot-caption">Цены и остатки — из снимка каталога.</p>
+        </aside>
+        </div>
         <p id="cart-status" class="cart-status" role="status" hidden></p>
-        <p class="prototype-note">Демонстрационная корзина. Товар не резервируется, заказ не оформляется.</p>
       </main>
     </div>
     <script src="/static/cart.js"></script>

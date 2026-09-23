@@ -1,5 +1,5 @@
 from .cart import number, json_number
-from .search import exact_matches, search_products, product_hit
+from .search import article_query, exact_matches, search_products, product_hit
 
 
 def review_items(session, items, index, filenames):
@@ -8,7 +8,11 @@ def review_items(session, items, index, filenames):
         raise ValueError("Передайте от 1 до 100 строк спецификации за один вызов.")
     reviewed = []
     for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("Некорректная строка спецификации.")
         filename = str(item.get("filename") or "")[:180]
+        if filename not in filenames and len(filenames) == 1:
+            filename = next(iter(filenames))
         if filename not in filenames:
             raise ValueError("Строка должна ссылаться на приложенный файл.")
         query = str(item.get("query") or "").strip()[:500]
@@ -20,7 +24,9 @@ def review_items(session, items, index, filenames):
                 raise ValueError("Количество должно быть положительным.")
             quantity = json_number(quantity)
         exact = exact_matches(index, query)
-        candidates = [product_hit(p) for p in exact[:5]] if exact else search_products(query, 5, index=index)["results"]
+        is_article = item.get("query_type") == "article" or article_query(query)
+        candidates = ([product_hit(p) for p in exact[:5]] if exact else [] if is_article or not query
+                      else search_products(query, 5, index=index)["results"])
         candidates = [p for p in candidates if not p.get("analog_of")]
         status = "unresolved" if not candidates else "ambiguous"
         if len(exact) == 1:

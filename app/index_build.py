@@ -10,10 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from openai import OpenAI
 
 from .catalog import embed_text, load_products
-from .config import EMBED_MODEL, INDEX_DIR, openai_api_key
+from .config import EMBED_MODEL, INDEX_DIR
+from .provider import client as provider_client
 
 
 def digest(data: bytes) -> str:
@@ -53,7 +53,7 @@ def embed_texts(client, texts: list[str], cache_path: Path, model: str = EMBED_M
 
 
 def build_index(data_dir: Path | None = None, index_dir: Path | None = None, *, client=None, limit: int | None = None) -> Path:
-    # load_products freezes complete CSV records; later appended rows belong to a future build.
+    # Published archives are immutable and fully checked before any embedding calls.
     products = load_products(data_dir)
     if limit is not None:
         products = products[:limit]
@@ -61,7 +61,7 @@ def build_index(data_dir: Path | None = None, index_dir: Path | None = None, *, 
         raise ValueError("No products found. Download a catalog snapshot first.")
     target = index_dir or INDEX_DIR
     target.mkdir(parents=True, exist_ok=True)
-    client = client or OpenAI(api_key=openai_api_key(), timeout=30, max_retries=2)
+    client = client or provider_client(timeout=30, max_retries=2)
     vectors = embed_texts(client, [embed_text(p)[:12000] for p in products], target / "embedding-cache.sqlite3")
     version = uuid.uuid4().hex
     folder = target / version
@@ -69,16 +69,24 @@ def build_index(data_dir: Path | None = None, index_dir: Path | None = None, *, 
     product_data = json.dumps(products, ensure_ascii=False, allow_nan=False).encode()
     (folder / "products.json").write_bytes(product_data)
     np.save(folder / "embeddings.npy", vectors)
+    observed = sorted(p["source_observed_at"] for p in products
+                      if p.get("quantity") is not None and p.get("source_observed_at"))
     metadata = {
         "version": version, "model": EMBED_MODEL, "dimensions": vectors.shape[1],
         "count": len(products), "indexed_at": datetime.now(timezone.utc).isoformat(),
         "source": "downloaded catalog snapshot", "stock_observed_at": None,
+        "source_precedence": ["raw API archive"] if products[0].get("source_response") else ["pages", "products.json", "csv", "details"],
+        "source_run_id": (products[0].get("source_response") or {}).get("run_id"),
+        "stock_observation_coverage": len(observed),
+        "stock_observation_range": [observed[0], observed[-1]] if observed else None,
         "products_sha256": digest(product_data),
         "vectors_sha256": digest((folder / "embeddings.npy").read_bytes()),
         "known_stock": sum(p.get("quantity") is not None for p in products),
         "certificates": sum(bool(p.get("certificate")) for p in products),
         "known_prices": sum(p.get("price") is not None for p in products),
         "known_units": sum(bool(p.get("unit_known")) for p in products),
+        "explicit_lengths": sum(bool(p.get("lengths")) for p in products),
+        "embedded_specifications": sum(bool(p.get("embedded_specifications")) for p in products),
         "minimum_quantities": sum(p.get("min_quantity") is not None for p in products),
         "purchase_multiples": sum(p.get("quantity_step") is not None for p in products),
         "unresolved_certificates": sum(bool(p.get("certificate_references")) and not p.get("certificates") for p in products),

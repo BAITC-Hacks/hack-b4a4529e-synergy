@@ -8,15 +8,19 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
-from openai import OpenAI
 
 from .catalog import public_properties, safe_url
 from .alternatives import compare, family, normalized, specs
 from .cart import format_kzt
-from .config import EMBED_MODEL, INDEX_DIR, openai_api_key
+from .config import EMBED_MODEL, INDEX_DIR
+from .provider import client as provider_client
 
 TOKEN_RE = re.compile(r"[0-9a-zа-яё._-]{2,}", re.IGNORECASE)
 MIN_SCORE = 0.30
+
+
+class CatalogUnavailable(RuntimeError):
+    pass
 
 
 def _tokens(text: str) -> set[str]:
@@ -88,10 +92,13 @@ def get_index() -> CatalogIndex:
         if _manual_index:
             return _index
         pointer = INDEX_DIR / "current.json"
-        stamp = pointer.read_text() if pointer.exists() else None
-        if _index is None or stamp != _index_stamp:
-            _index = CatalogIndex.load()
-            _index_stamp = stamp
+        try:
+            stamp = pointer.read_text() if pointer.exists() else None
+            if _index is None or stamp != _index_stamp:
+                _index = CatalogIndex.load()
+                _index_stamp = stamp
+        except (FileNotFoundError, ValueError, KeyError, OSError) as exc:
+            raise CatalogUnavailable("Catalog index is unavailable") from exc
         return _index
 
 
@@ -115,6 +122,12 @@ def product_hit(product: dict, score: float | None = None) -> dict:
         "stores": product.get("stores") or [],
         "min_quantity": product.get("min_quantity"), "quantity_step": product.get("quantity_step"),
         "purchase_rule_note": product.get("purchase_rule_note") or "",
+        "source_observed_at": product.get("source_observed_at"),
+        "unit_known": product.get("unit_known", False),
+        "unit_source": product.get("unit_source"),
+        "lengths": product.get("lengths") or [],
+        "description": product.get("description") or "",
+        "supplier_availability": product.get("supplier_availability"),
     })
     if score is not None:
         hit["score"] = round(float(score), 4)
@@ -122,7 +135,8 @@ def product_hit(product: dict, score: float | None = None) -> dict:
 
 
 def product_detail(product: dict) -> dict:
-    return {**product_hit(product), "description": product.get("description") or ""}
+    return {**product_hit(product), "description": product.get("description") or "",
+            "embedded_specifications": product.get("embedded_specifications") or {}}
 
 
 def exact_matches(index: CatalogIndex, query: str) -> list[dict]:
@@ -149,7 +163,7 @@ def exact_matches(index: CatalogIndex, query: str) -> list[dict]:
 
 @lru_cache(maxsize=256)
 def _embed_query(text: str, model: str) -> np.ndarray:
-    client = OpenAI(api_key=openai_api_key(), timeout=10, max_retries=1)
+    client = provider_client(timeout=10, max_retries=1)
     response = client.embeddings.create(model=model, input=[text])
     vector = np.asarray(response.data[0].embedding, dtype=np.float32)
     if not np.isfinite(vector).all() or np.linalg.norm(vector) == 0:
@@ -159,6 +173,33 @@ def _embed_query(text: str, model: str) -> np.ndarray:
 
 def technical_specs(product: dict) -> dict:
     return {label: normalized(label, value) for label, value in specs(product).items()}
+
+
+def constrain_results(query: str, products: list[dict], *, index) -> list[dict]:
+    """Exploratory tool queries must not loosen the customer's stated requirements."""
+    if exact_matches(index, query):
+        return products
+    requested = {"name": query}
+    wanted, wanted_family = technical_specs(requested), family(requested)
+    if not wanted and not wanted_family:
+        return products
+    matches = []
+    for product in products:
+        source = index.get(product["id"]) or product
+        actual, actual_family = technical_specs(source), family(source)
+        if wanted_family and actual_family and wanted_family != actual_family:
+            continue
+        if any(key in actual and actual[key] != value for key, value in wanted.items()):
+            continue
+        missing = sorted(wanted.keys() - actual.keys())
+        if wanted_family and not actual_family:
+            missing.append("тип товара")
+        hit = {**product}
+        hit.pop("unverified_specs", None)
+        if missing:
+            hit["unverified_specs"] = missing
+        matches.append(hit)
+    return matches
 
 
 def _analogs_for(index: CatalogIndex, source: dict, limit: int) -> list[dict]:
@@ -179,6 +220,11 @@ def _analogs_for(index: CatalogIndex, source: dict, limit: int) -> list[dict]:
     return [x[3] for x in ranked[:limit]]
 
 
+def article_query(query: str) -> bool:
+    return bool(re.search(r"\b(?:артикул(?:а|у|ом)?|article|код)\s*[:№#]?\s*[0-9a-zа-яё._-]+", query, re.I)
+                or re.fullmatch(r"\d{6,}_?|(?=.*\d)[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+){2,}_?", query.strip()))
+
+
 def search_products(query: str, limit: int = 5, *, index=None, embed_query=None) -> dict:
     catalog = index or get_index()
     limit = max(1, min(int(limit), 10))
@@ -188,6 +234,8 @@ def search_products(query: str, limit: int = 5, *, index=None, embed_query=None)
     exact = exact_matches(catalog, query)
     if exact:
         hits = [{**product_hit(product, 1.0), "exact_match": True} for product in exact[:limit]]
+    elif article_query(query):
+        hits = []
     else:
         vector = embed_query(query) if embed_query else _embed_query(query, catalog.metadata["model"])
         if vector.shape != (catalog.embeddings.shape[1],):
@@ -216,7 +264,7 @@ def search_products(query: str, limit: int = 5, *, index=None, embed_query=None)
                 verified.append(hit)
             if len(verified) >= limit:
                 break
-        hits = (verified + uncertain)[:limit]
+        hits = (verified or uncertain)[:limit]
     if hits and hits[0]["availability"] == "out_of_stock":
         analogs = _analogs_for(catalog, catalog.get(hits[0]["id"]), 3)
         if len(exact) <= 1:
@@ -227,8 +275,13 @@ def search_products(query: str, limit: int = 5, *, index=None, embed_query=None)
                     combined.append(hit)
                     seen.add(hit["id"])
             hits = combined[:max(limit, len(analogs) + 1)]
-    return {"query": query, "results": hits, "ambiguous": len(exact) > 1,
-            "needs_clarification": not hits or len(exact) > 1 or bool(hits[0].get("unverified_specs")),
+    semantic_ambiguous = not exact and len(hits) > 1 and any(
+        technical_specs(catalog.get(hit["id"])) != technical_specs(catalog.get(hits[0]["id"]))
+        for hit in hits[1:]
+    )
+    ambiguous = len(exact) > 1 or semantic_ambiguous
+    return {"query": query, "results": hits, "ambiguous": ambiguous,
+            "needs_clarification": not hits or ambiguous or bool(hits[0].get("unverified_specs")),
             "snapshot": catalog.metadata,
             "note": "Остатки и цены из снимка; добавление не резервирует товар."}
 

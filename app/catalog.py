@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+from copy import deepcopy
+import html
 import io
 import json
 import math
@@ -33,6 +35,12 @@ PROP_LABELS = {
     "CML2_BAR_CODE": "Штрихкод",
     "ARTIKULPOSTAVSHCHIKA": "Артикул поставщика",
     "OBYEM": "Тип",
+    "DLINA_SHNURA": "Длина кабеля / шнура",
+    "DLINA_RULONA": "Длина рулона",
+    "DLINA": "Длина",
+    "METRAZHNYY_TOVAR": "Продаётся на метраж",
+    "KOL_VO_U_POSTAVSHCHIKA": "Количество у поставщика",
+    "KOL_VO_CHASOV_DOSTAVKI_OT_POSTAVSHCHIKA": "Срок поступления от поставщика",
 }
 
 CSV_FIELDS = {
@@ -112,7 +120,7 @@ def _as_price(value):
         amount = Decimal(str(value).replace(" ", "").replace(",", "."))
     except InvalidOperation:
         return None
-    if not amount.is_finite() or amount < 0:
+    if not amount.is_finite() or amount < 0 or amount > Decimal("1000000000000"):
         return None
     return int(amount) if amount == amount.to_integral_value() else format(amount, "f")
 
@@ -182,19 +190,69 @@ def certificate_links(record: dict) -> list[str]:
 
 def purchase_fields(raw, properties):
     unit = raw.get("unit") or raw.get("measure") or properties.get("CML2_BASE_UNIT")
+    unit_source = "unit" if raw.get("unit") else "measure" if raw.get("measure") else "properties.CML2_BASE_UNIT"
     if isinstance(unit, dict):
         unit = unit.get("symbol") or unit.get("name")
     unit = str(unit or "").strip()
     unit_known = bool(unit and "\ufffd" not in unit and unit != "ед.")
+    if not unit_known and str(properties.get("METRAZHNYY_TOVAR", "")).strip().casefold() == "да":
+        unit, unit_known, unit_source = "м", True, "properties.METRAZHNYY_TOVAR"
     minimum = _as_number(raw.get("min_quantity", raw.get("minimum_order_quantity")))
     step = _as_number(raw.get("quantity_step", raw.get("purchase_multiple")))
     note = ""
     if properties.get("KRATNOST_MIN") and minimum is None and step is None:
-        note = "Исходное поле KRATNOST_MIN: " + str(properties["KRATNOST_MIN"]) + ". Значение минимума/кратности требует подтверждения поставщика."
+        note = "Минимальная партия и кратность требуют подтверждения поставщика."
     return {"unit": unit if unit_known else "ед.", "unit_known": unit_known,
+            "unit_source": unit_source if unit_known else None,
             "min_quantity": minimum if minimum and minimum > 0 else None,
             "quantity_step": step if step and step > 0 else None,
             "purchase_rule_note": note}
+
+
+def length_fields(properties):
+    """Only explicit length attributes; no guessing from packaging or stock."""
+    fields = []
+    for key in ("DLINA_SHNURA", "DLINA_RULONA", "DLINA_KABELYA", "DLINA", "DLINA_1"):
+        if key not in properties:
+            continue
+        raw = properties[key]
+        match = re.fullmatch(r"\s*(\d+(?:[.,]\d+)?)\s*(м|м\.|метр(?:а|ов)?|m|мм|mm|см|cm)\s*", str(raw), re.I)
+        metres = None
+        if match:
+            scale = {"мм": Decimal(".001"), "mm": Decimal(".001"), "см": Decimal(".01"), "cm": Decimal(".01")}.get(match[2].lower(), Decimal(1))
+            metres = float(Decimal(match[1].replace(",", ".")) * scale)
+        fields.append({"kind": "roll" if key == "DLINA_RULONA" else "cord" if key == "DLINA_SHNURA" else "length",
+                       "source_field": "properties." + key, "raw_value": deepcopy(raw), "metres": metres,
+                       "status": "parsed" if metres is not None else "empty" if raw in (None, "", []) else "unrecognized"})
+    return fields
+
+
+def embedded_specs(properties):
+    result = {}
+    for key in ("WB_SPECIFICATIONS",):
+        value = properties.get(key)
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(html.unescape(value))
+            except (ValueError, TypeError):
+                result[key] = {"source_field": "properties." + key, "status": "unrecognized", "value": None}
+            else:
+                result[key] = {"source_field": "properties." + key, "status": "decoded", "value": decoded}
+    return result
+
+
+def supplier_fields(properties):
+    quantity_key = "KOL_VO_U_POSTAVSHCHIKA"
+    time_key = "KOL_VO_CHASOV_DOSTAVKI_OT_POSTAVSHCHIKA"
+    if quantity_key not in properties and time_key not in properties:
+        return None
+    raw_time = properties.get(time_key)
+    match = re.fullmatch(r"\s*(\d+(?:[.,]\d+)?)\s*(?:час(?:а|ов)?|ч\.?|h(?:ours?)?)?\s*", str(raw_time), re.I)
+    return {"quantity": _as_number(properties.get(quantity_key)),
+            "lead_time_hours": _as_number(match[1]) if match else None,
+            "quantity_raw": deepcopy(properties.get(quantity_key)), "lead_time_raw": deepcopy(raw_time),
+            "quantity_source": "properties." + quantity_key, "lead_time_source": "properties." + time_key,
+            "note": "Остаток у поставщика не входит в доступный остаток каталога. Срок поступления не является сроком доставки клиенту."}
 
 
 def spec_snippet(record: dict, limit: int = 280) -> str:
@@ -243,7 +301,7 @@ def _empty_product() -> dict:
 
 def parse_stores(value) -> list:
     if isinstance(value, list):
-        return [{"name": item.get("name") or str(item.get("id", "")),
+        return [{**deepcopy(item), "name": item.get("name") or str(item.get("id", "")),
                  "quantity": _as_number(item.get("quantity"))} for item in value if isinstance(item, dict)]
     if not isinstance(value, str) or not value.strip():
         return []
@@ -289,12 +347,18 @@ def normalize_product(raw: dict) -> dict | None:
             "article": str(raw.get("article") or "").strip(),
             "price": _as_price(raw.get("price")),
             "quantity": _as_number(raw.get("quantity")),
+            "source_observed_at": raw.get("_source_observed_at") or raw.get("_source_refreshed_at"),
             "image": safe_url(raw.get("image")),
             "url": safe_url(raw.get("url")),
             "category": (raw.get("category") or category_from_url(raw.get("url") or "")).strip(),
             "description": (raw.get("description") or "").strip(),
             "properties": properties,
             "stores": stores,
+            "offers": deepcopy(raw.get("offers")),
+            "source_fields": deepcopy(raw),
+            "lengths": length_fields(properties),
+            "embedded_specifications": embedded_specs(properties),
+            "supplier_availability": supplier_fields(properties),
             "certificate": extract_certificate({**raw, "properties": properties}),
             "certificates": certificate_links({**raw, "properties": properties}),
             "certificate_references": properties.get("FILES_CERTIFICATES") or [],
@@ -408,7 +472,19 @@ def _load_csv(path: Path) -> list[dict]:
 
 
 def load_products(data_dir: Path | None = None) -> list[dict]:
+    # Explicit precedence, oldest to strongest: listing pages, combined JSON,
+    # complete CSV rows, then individual API details.
     root = data_dir or DATA_DIR
+    if (root / "current.json").exists():
+        from .catalog_archive import archived_records
+        products = []
+        for raw, source in archived_records(root):
+            product = normalize_product(raw)
+            if product is None:
+                raise ValueError("Archived product cannot be normalized")
+            product.update(source_response=source, source_observed_at=source["observed_at"])
+            products.append(product)
+        return sorted(products, key=lambda p: p["id"])
     pages_dir = root / "pages" if data_dir else PAGES_DIR
     details_dir = root / "details" if data_dir else DETAILS_DIR
     by_id: dict[int, dict] = {}
@@ -434,7 +510,7 @@ def load_products(data_dir: Path | None = None) -> list[dict]:
                 by_id[product["id"]] = product
 
     if details_dir.is_dir():
-        for path in details_dir.glob("*.json"):
+        for path in sorted(details_dir.glob("*.json")):
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:

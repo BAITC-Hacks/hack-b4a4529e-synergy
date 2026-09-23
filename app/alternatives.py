@@ -20,7 +20,7 @@ ALIASES = {
 }
 ESSENTIAL = {
     "breaker": {"ток", "полюса", "напряжение", "характеристика", "отключающая способность", "монтаж"},
-    "cable": {"число жил", "сечение", "материал жилы", "напряжение", "изоляция"},
+    "cable": {"марка кабеля", "число жил", "сечение", "материал жилы", "напряжение", "изоляция"},
     "lamp": {"цоколь", "напряжение", "мощность", "тип лампы"},
     "luminaire": {"напряжение", "мощность", "защита", "монтаж"},
 }
@@ -30,9 +30,12 @@ def family(product):
     name = product.get("name", "").casefold()
     description = (product.get("description") or "").casefold()
     category = (product.get("category") or "").casefold()
+    if re.search(r"\b(?:узо|авдт|дифф?автомат|rcbo)\b", name + " " + description):
+        return "differential_breaker"
     if re.search(r"автомат(?:ический)?\b|выключатель.*(?:drx|dx3)|\bmcb\b", name + " " + description) or "avtomaticheskie_vyklyuchateli" in category:
         return "breaker"
-    if re.search(r"(?:кабель|провод)\b", name) and not re.search(r"канал|держатель|наконечник|ввод", name):
+    cable_name = re.search(r"(?:кабель|провод|ввг|кввг)\b", name)
+    if (cable_name or category.startswith("kabel_provod")) and not re.search(r"канал|держатель|наконечник|ввод|гильз|стяжк|креп[её]ж", name):
         return "cable"
     if "светильник" in name:
         return "luminaire"
@@ -45,6 +48,10 @@ def family(product):
 
 def normalized(label, value):
     value = re.sub(r"\s+", "", str(value).casefold().replace(",", ".")).replace("²", "2")
+    if label == "защита":
+        return re.sub(r"^ip", "", value)
+    if label == "материал жилы":
+        return {"cu": "медь", "медный": "медь", "al": "алюминий", "алюминиевый": "алюминий"}.get(value, value)
     if label in {"ток", "отключающая способность", "напряжение", "мощность", "сечение", "температура света", "полюса", "число жил"}:
         m = re.fullmatch(r"(\d+(?:\.\d+)?)([a-zа-яё.0-9]*)", value)
         if m:
@@ -69,6 +76,7 @@ def specs(product):
         "полюса": r"(?<!\w)([1-4])\s*[pр](?![a-zа-я])",
         "отключающая способность": r"(\d+(?:[.,]\d+)?)\s*[кk][аa]",
         "напряжение": r"(?<![\w.])(\d+(?:[.,]\d+)?)\s*[вv](?![a-zа-я])",
+        "мощность": r"(?<![\w.])(\d+(?:[.,]\d+)?)\s*(?:вт|w)(?![a-zа-я])",
         "защита": r"\bIP\s*(\d{2})",
         "температура света": r"(\d{4})\s*[kк]\b",
         "цоколь": r"\b(E\d{2}|GU\d+(?:\.\d+)?|G\d+(?:\.\d+)?)\b",
@@ -76,7 +84,17 @@ def specs(product):
     for label, pattern in patterns.items():
         if label not in values and (match := re.search(pattern, name, re.I)):
             values[label] = match.group(1) + (" kA" if label == "отключающая способность" else "")
+    if family(product) == "breaker":
+        if match := re.search(r"(?<!\w)([bcdвсд])\s*(\d+(?:[.,]\d+)?)(?:\s*[аa])?(?!\w)", name, re.I):
+            values.setdefault("характеристика", match.group(1).upper().translate(str.maketrans("ВСД", "BCD")))
+            values.setdefault("ток", match.group(2))
     if family(product) == "cable":
+        if series := re.search(r"\b(аввг|ввг|квк|кг)", name, re.I):
+            values.setdefault("марка кабеля", series.group(1).upper())
+        if re.search(r"\bаввг", name, re.I):
+            values.setdefault("материал жилы", "Алюминий")
+        elif re.search(r"\bввг", name, re.I):
+            values.setdefault("материал жилы", "Медь")
         if match := re.search(r"\b(\d+)\s*[xх×]\s*(\d+(?:[.,]\d+)?)", name, re.I):
             values.setdefault("число жил", match.group(1))
             values.setdefault("сечение", match.group(2))
@@ -99,6 +117,8 @@ def compare(source, candidate):
     if differences:
         return None
     unknowns = sorted((ESSENTIAL.get(kind, set()) | original.keys() | other.keys()) - common)
+    if kind not in ESSENTIAL:
+        unknowns.append("полный набор параметров совместимости для этой категории")
     brand_a = (source.get("properties") or {}).get("TORGOVAYA_MARKA")
     brand_b = (candidate.get("properties") or {}).get("TORGOVAYA_MARKA")
     if brand_a and brand_b and brand_a != brand_b:

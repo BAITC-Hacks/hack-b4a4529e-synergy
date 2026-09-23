@@ -130,8 +130,14 @@ def purchase_options(session: Session, product: dict) -> dict:
         suggested = max(needed, min(Decimal(1), remaining))
     can_add = (remaining > 0 and suggested > 0 and suggested <= remaining
                and (increment is None or increment > 0))
-    reason = "" if can_add else ("Весь доступный остаток уже в корзине." if remaining <= 0
-                                 else "Остатка недостаточно для минимального количества или кратности.")
+    if can_add:
+        reason = ""
+    elif stock <= 0:
+        reason = "Нет в наличии по снимку каталога."
+    elif remaining <= 0:
+        reason = "Весь доступный остаток уже в корзине."
+    else:
+        reason = "Остатка недостаточно для минимального количества или кратности."
     return {"can_add": can_add, "reason": reason, "existing": str(existing), "remaining": str(remaining),
             "suggested_quantity": str(suggested), "step": str(increment) if increment else "any",
             "unit": unit}

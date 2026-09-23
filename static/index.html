@@ -11,8 +11,8 @@
       <header class="mast">
         <a class="mark" href="/" aria-label="На главную">ЭК</a>
         <div class="mast-copy">
-          <p class="kicker">Электрокомплект · ekt.kz</p>
-          <h1>Консультант по каталогу</h1>
+          <p class="kicker">Электрокомплект</p>
+          <h1>Подбор товаров</h1>
         </div>
         <a class="bin" href="/cart">
           Корзина
@@ -22,15 +22,15 @@
 
       <main id="log" class="log" aria-label="Переписка">
         <div class="welcome" id="welcome">
-          <p class="welcome-label">Поиск по каталогу</p>
-          <p class="welcome-lead">Найдём нужный товар.</p>
+          <p class="welcome-label">Каталог ekt.kz</p>
+          <h2 class="welcome-lead">Что вам нужно<br />для работы?</h2>
           <p class="welcome-sub">
-            Напишите артикул, название или опишите задачу. Покажем товары, цены и остатки из каталога.
+            Найдём товар по названию, артикулу или вашей спецификации. Поможем сравнить и собрать корзину.
           </p>
           <div class="suggestions" aria-label="Примеры запросов">
-            <button type="button" class="suggestion">Автоматический выключатель 16 А</button>
-            <button type="button" class="suggestion">Кабель ВВГ 3×2,5</button>
-            <button type="button" class="suggestion">Розетка накладная</button>
+            <button type="button" class="suggestion">Кабель ВВГ 3×2,5 <span aria-hidden="true">↗</span></button>
+            <button type="button" class="suggestion">Автоматический выключатель 16 А <span aria-hidden="true">↗</span></button>
+            <button type="button" class="suggestion">Розетка накладная <span aria-hidden="true">↗</span></button>
           </div>
         </div>
       </main>
@@ -39,6 +39,7 @@
 
       <p id="status" class="status" role="status" hidden></p>
 
+      <div class="composer-dock">
       <form id="composer" class="composer">
         <input
           id="file"
@@ -47,8 +48,8 @@
           multiple
           accept="image/jpeg,image/png,image/webp,image/gif,.pdf,.doc,.docx,.xls,.xlsx,.csv"
         />
-        <button type="button" class="icon-btn" id="attach" aria-label="Прикрепить фото или документ">
-          <span aria-hidden="true">+</span>
+        <button type="button" class="icon-btn" id="attach" aria-label="Прикрепить фото или документ" title="Прикрепить фото или спецификацию">
+          <svg aria-hidden="true" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m8 12 6-6a3 3 0 0 1 4.2 4.2l-8 8a5 5 0 0 1-7.1-7.1l8-8"/><path d="m8 12-1 1a1.5 1.5 0 0 0 2.1 2.1l7-7"/></svg>
         </button>
         <label class="sr-only" for="message">Сообщение</label>
         <textarea
@@ -56,14 +57,29 @@
           name="message"
           rows="1"
           maxlength="8000"
-          placeholder="Введите запрос"
+          placeholder="Товар или артикул…"
         ></textarea>
-        <button type="submit" class="send" id="send">Отправить</button>
+        <button type="submit" class="send" id="send" aria-label="Отправить сообщение" title="Отправить сообщение">
+          <svg aria-hidden="true" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
+        </button>
         <ul id="chips" class="file-list" hidden></ul>
       </form>
-      <p class="prototype-note">Демо: заказ не оформляется · цены и остатки из снимка каталога</p>
-      <p class="prototype-note">Сообщения и файлы обрабатываются AI-провайдером. Файлы не сохраняются в чате. Не отправляйте платёжные данные.</p>
-      <p class="prototype-note">До 5 файлов: 10 МБ каждый, 20 МБ всего. Excel/CSV — до 1000 строк на лист. Изображения внутри Word/Excel приложите как PDF или фото.</p>
+      <div class="composer-footnote">
+        <p>Демо · без оформления заказа</p>
+        <button type="button" class="text-button" id="open-info">О данных и файлах</button>
+      </div>
+      </div>
+      <dialog id="info-dialog" class="info-dialog" aria-labelledby="info-title">
+        <form method="dialog"><button class="dialog-close" aria-label="Закрыть">×</button></form>
+        <h2 id="info-title">О данных и файлах</h2>
+        <h3>Демонстрационный каталог</h3>
+        <p>Цены и остатки взяты из снимка каталога. Актуальные данные нужно уточнить у поставщика. Корзина не оформляет заказ и не резервирует товар.</p>
+        <h3>Фото и спецификации</h3>
+        <p>До 5 файлов: 10 МБ каждый, 20 МБ всего. Поддерживаются фото, PDF, Word, Excel и CSV. В Excel и CSV — до 1000 строк на лист.</p>
+        <p>Изображения внутри Word или Excel приложите отдельно как PDF или фото.</p>
+        <h3>Обработка данных</h3>
+        <p>Сообщения и файлы обрабатываются AI-провайдером. Файлы не сохраняются в чате. Не отправляйте платёжные данные.</p>
+      </dialog>
     </div>
     <script src="/static/chat.js"></script>
   </body>

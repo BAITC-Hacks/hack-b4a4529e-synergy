@@ -37,6 +37,8 @@ class CertificateAnchors(HTMLParser):
 
 
 def refresh(ids=None, limit=40):
+    if (DATA_DIR / "current.json").exists():
+        raise SystemExit("Raw archives are immutable. Run python download_ekt.py --new, then python -m app.index_build.")
     from download_ekt import save_detail
     products = load_products()
     if ids:

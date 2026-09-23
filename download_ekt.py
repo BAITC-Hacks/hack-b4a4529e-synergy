@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
-"""Download the ekt.kz catalog into CSV, resuming by catalog page."""
+"""Archive complete EKT API responses; resume from checksummed raw files."""
 
+import argparse
 import asyncio
+import io
 import csv
 import fcntl
 import json
 import os
-import time
 import uuid
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
+from app.catalog_archive import (API_BASE, PAGE_SIZE, archived_records, atomic_bytes, atomic_json,
+                                 checksum, detail_url, listing_records, read_response, run_path,
+                                 utc_now, validate_detail, validate_page)
+
 ROOT = Path(__file__).resolve().parent
-BASE = "https://ekt.kz/api/products"
+BASE = API_BASE
 OUT = ROOT / "data" / "ekt"
-CSV_PATH = OUT / "products.csv"
-LIST_PATH = OUT / "list_checkpoint.txt"
-CONCURRENCY = int(os.environ.get("EKT_CONCURRENCY", "64"))
-LIST_PAGE_SIZE = 500
-LIST_CONCURRENCY = min(CONCURRENCY, 4)
-REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=25, sock_connect=10, sock_read=20)
+CONCURRENCY = int(os.environ.get("EKT_CONCURRENCY", "16"))
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30, sock_connect=10, sock_read=25)
 LIST_TIMEOUT = aiohttp.ClientTimeout(total=60, sock_connect=10, sock_read=55)
 COLUMNS = [
     "id",
@@ -46,10 +48,6 @@ def load_dotenv(path: Path) -> None:
             continue
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
-
-def item_ids(page: dict) -> list[int]:
-    return [item["id"] for item in page.get("items") or []]
 
 
 def flat(value) -> str:
@@ -102,324 +100,259 @@ def save_detail(data: dict, root: Path | None = None) -> None:
     os.replace(temporary, directory / f"{product_id}.json")
 
 
-def spreadsheet_row(row: dict) -> dict:
-    return {
-        key: " ".join(value.split()) if isinstance(value, str) else value
-        for key, value in row.items()
-    }
 
-
-def ensure_spreadsheet_csv() -> None:
-    if not CSV_PATH.exists() or CSV_PATH.stat().st_size == 0:
-        return
-    with CSV_PATH.open(encoding="utf-8-sig", newline="") as source:
-        header = source.readline().rstrip("\r\n")
-        if header == ";".join(COLUMNS):
-            return
-        if header != ",".join(COLUMNS):
-            raise ValueError(f"Unexpected CSV header in {CSV_PATH}")
-        source.seek(0)
-        temp_path = CSV_PATH.with_suffix(".csv.tmp")
-        with temp_path.open("w", encoding="utf-8-sig", newline="") as target:
-            writer = csv.DictWriter(target, fieldnames=COLUMNS, delimiter=";")
-            writer.writeheader()
-            writer.writerows(spreadsheet_row(row) for row in csv.DictReader(source))
-        os.replace(temp_path, CSV_PATH)
-
-
-def load_saved_ids() -> set[int]:
-    if not CSV_PATH.exists():
-        return set()
-    with CSV_PATH.open(encoding="utf-8-sig", newline="") as handle:
-        return {int(row["id"]) for row in csv.DictReader(handle, delimiter=";")}
-
-
-def load_list_pages() -> dict[int, list[int]]:
-    pages: dict[int, list[int]] = {}
-    if not LIST_PATH.exists():
-        return pages
-    for line in LIST_PATH.read_text().splitlines():
-        if "\t" not in line:
-            continue
-        page_s, ids_s = line.split("\t", 1)
-        if not page_s.startswith(f"{LIST_PAGE_SIZE}:"):
-            continue
+async def fetch_response(session, url, params, timeout=REQUEST_TIMEOUT):
+    """Return the body bytes without JSON reserialization or credential logging."""
+    for attempt in range(6):
         try:
-            number = int(page_s.split(":", 1)[1])
-        except ValueError:
-            continue
-        ids = [int(part) for part in ids_s.split(",") if part]
-        if ids:
-            pages[number] = ids
-    return pages
+            async with session.get(url, params=params, timeout=timeout, allow_redirects=False) as response:
+                body = await response.read()
+                status = response.status
+            if status == 200:
+                return body, status
+            if status not in {429, 500, 502, 503, 504}:
+                return body, status
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            status = "transport failure"
+        if attempt < 5:
+            await asyncio.sleep(min(.5 * 2 ** attempt, 8))
+    if isinstance(status, int):
+        return body, status
+    raise ValueError(f"API request failed after retries ({status})")
 
 
-def catalog_end(pages: dict[int, list[int]], signature: list[int], per_page: int) -> int | None:
-    for number in sorted(pages):
-        ids = pages[number]
-        if number != 1 and ids == signature:
-            continue
-        if len(ids) < per_page:
-            return number
-    return None
+def open_run(root, new=False):
+    pointer = root / "download.json"
+    if pointer.exists() and not new:
+        run_id = json.loads(pointer.read_text())["run_id"]
+        folder = run_path(root, run_id)
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+        if manifest.get("schema_version") != 1 or manifest.get("run_id") != run_id:
+            raise ValueError("Unsupported download manifest; start with --new")
+        return folder, manifest
+    run_id = uuid.uuid4().hex
+    folder = run_path(root, run_id)
+    manifest = {"schema_version": 1, "run_id": run_id, "api_base": BASE,
+                "page_size": PAGE_SIZE, "started_at": utc_now(), "status": "downloading",
+                "last_page": None, "pages": {}, "details": {}}
+    atomic_json(folder / "manifest.json", manifest)
+    atomic_json(pointer, {"run_id": run_id})
+    return folder, manifest
 
 
-async def get_json(
-    session: aiohttp.ClientSession,
-    url: str,
-    sem: asyncio.Semaphore,
-    timeout: aiohttp.ClientTimeout = REQUEST_TIMEOUT,
-) -> dict:
-    delay = 0.25
-    last_error: Exception | str | None = None
-    for _ in range(6):
+async def obtain(session, folder, entries, key, path, url, params, validate, timeout=REQUEST_TIMEOUT):
+    entry = entries.get(key)
+    if entry:
         try:
-            async with sem:
-                async with session.get(url, timeout=timeout) as resp:
-                    body = await resp.read()
-            if resp.status in (429, 500, 502, 503, 504):
-                last_error = f"HTTP {resp.status} {url}"
-            elif resp.status != 200:
-                raise RuntimeError(f"HTTP {resp.status} {url} {body[:180]!r}")
-            else:
-                return json.loads(body)
-        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
-            last_error = exc
-        await asyncio.sleep(delay)
-        delay = min(delay * 2, 4)
-    raise RuntimeError(f"{url}: {last_error}")
+            data = read_response(folder, entry)
+            validate(data)
+            return data
+        except (OSError, ValueError, KeyError, TypeError):
+            pass  # Only incomplete runs are repaired; completed archives remain immutable.
+    request_params = {key: values[0] if len(values) == 1 else values
+                      for key, values in parse_qs(urlparse(url).query).items()}
+    entry = {"path": path, "url": url, "params": {**request_params, **params}, "status": "pending"}
+    entries[key] = entry
+    try:
+        body, status = await fetch_response(session, url, params, timeout)
+        # Persist even malformed HTTP-200 bodies; invalid entries are never complete.
+        atomic_bytes(folder / path, body)
+        entry.update(http_status=status, fetched_at=utc_now(), sha256=checksum(body), bytes=len(body))
+        if status != 200:
+            raise ValueError(f"API HTTP {status}")
+        data = json.loads(body)
+        validate(data)
+        entry["status"] = "complete"
+        return data
+    except (ValueError, OSError, TypeError) as exc:
+        entry.update(status="failed", error=type(exc).__name__)
+        raise
 
 
-class Writer:
-    def __init__(self, saved_ids: set[int]) -> None:
-        self.saved_ids = saved_ids
-        self.saved = len(saved_ids)
-        self.failed = 0
-        new_file = not CSV_PATH.exists() or CSV_PATH.stat().st_size == 0
-        self.csv_handle = CSV_PATH.open("a", newline="", encoding="utf-8")
-        self.writer = csv.DictWriter(self.csv_handle, fieldnames=COLUMNS, delimiter=";")
-        if new_file:
-            self.csv_handle.write("\ufeff")
-            self.writer.writeheader()
-            self.csv_handle.flush()
-
-    def close(self) -> None:
-        self.csv_handle.close()
-
-    def commit_page(self, number: int, rows: list[dict]) -> None:
-        new_rows = []
-        seen = set(self.saved_ids)
-        for row in rows:
-            product_id = int(row["id"])
-            if product_id not in seen:
-                new_rows.append(row)
-                seen.add(product_id)
-        self.writer.writerows(spreadsheet_row(row) for row in new_rows)
-        self.csv_handle.flush()
-        os.fsync(self.csv_handle.fileno())
-        self.saved_ids.update(int(row["id"]) for row in new_rows)
-        self.saved += len(new_rows)
-        print(f"page={number} saved={self.saved} new={len(new_rows)}", flush=True)
+async def collect_archive(session, folder, manifest):
+    seen = set()
+    number = 1
+    manifest["last_page"] = None
+    while True:
+        try:
+            data = await obtain(session, folder, manifest["pages"], str(number), f"pages/{number:05d}.json",
+                                BASE, {"page": number, "per_page": PAGE_SIZE},
+                                lambda d: validate_page(d, number), LIST_TIMEOUT)
+            items = data["items"]
+            ids = {item["id"] for item in items}
+            if seen & ids:
+                raise ValueError("Repeated listing content; use --new after the API listing stabilizes")
+            seen.update(ids)
+            print(f"Listing page={number} products={len(seen)}", flush=True)
+            if len(items) < PAGE_SIZE:
+                manifest["last_page"] = number
+                break
+            number += 1
+        finally:
+            atomic_json(folder / "manifest.json", manifest)
+    if not seen:
+        raise ValueError("Empty API catalog; active catalog preserved")
+    return listing_records(folder, manifest)
 
 
-async def collect_pages(
-    session: aiohttp.ClientSession,
-    sem: asyncio.Semaphore,
-    pages: dict[int, list[int]],
-    list_handle,
-    queue: asyncio.Queue,
-    scheduled: set[int],
-    saved_ids: set[int],
-) -> None:
-    lock = asyncio.Lock()
+async def download_archive_details(session, folder, manifest, records, concurrency):
+    queue = asyncio.Queue()
+    for product_id in sorted(records):
+        queue.put_nowait(product_id)
+    failures, checked = [], 0
 
-    def remember(number: int, ids: list[int]) -> None:
-        if number in pages:
-            return
-        list_handle.write(f"{LIST_PAGE_SIZE}:{number}\t{','.join(str(item_id) for item_id in ids)}\n")
-        list_handle.flush()
-        os.fsync(list_handle.fileno())
-        pages[number] = ids
-        schedule(number, ids)
-
-    def schedule(number: int, ids: list[int]) -> None:
-        if number in scheduled:
-            return
-        scheduled.add(number)
-        if not all(item_id in saved_ids for item_id in ids):
-            queue.put_nowait((number, ids))
-
-    async def fetch_list(number: int) -> list[int]:
-        data = await get_json(
-            session, f"{BASE}?page={number}&per_page={LIST_PAGE_SIZE}", sem, LIST_TIMEOUT
-        )
-        if data.get("per_page") != LIST_PAGE_SIZE:
-            raise RuntimeError(f"Unexpected per_page on list page {number}: {data.get('per_page')}")
-        return item_ids(data)
-
-    if 1 not in pages:
-        remember(1, await fetch_list(1))
-    signature = pages[1]
-    per_page = LIST_PAGE_SIZE
-    end = catalog_end(pages, signature, per_page)
-
-    async def fetch_page(number: int) -> str:
-        if number in pages:
-            ids = pages[number]
-            if number != 1 and ids == signature:
-                return "end"
-            if len(ids) < per_page:
-                return "end"
-            return "ok"
-        ids = await fetch_list(number)
-        async with lock:
-            if number != 1 and (not ids or ids == signature):
-                return "end"
-            remember(number, ids)
-            if len(ids) < per_page:
-                return "end"
-        return "ok"
-
-    if end is not None:
-        missing = [number for number in range(1, end + 1) if number not in pages]
-        if missing:
-            await asyncio.gather(*(fetch_page(number) for number in missing))
-        for number in range(1, end + 1):
-            ids = pages.get(number) or []
-            if ids:
-                schedule(number, ids)
-        print(f"list pages={end} queued_pages={queue.qsize()}", flush=True)
-        return
-
-    # Cached pages may have been listed before their details were saved.
-    for number in sorted(pages):
-        if pages[number] == signature and number != 1:
-            continue
-        schedule(number, pages[number])
-
-    # Retry holes left by interrupted concurrent page requests.
-    next_number = 2
-    stop = False
-
-    def fill(page_queue: asyncio.Queue) -> None:
-        nonlocal next_number
-        while not stop and page_queue.qsize() < LIST_CONCURRENCY * 2:
-            page_queue.put_nowait(next_number)
-            next_number += 1
-
-    page_queue: asyncio.Queue = asyncio.Queue()
-    fill(page_queue)
-
-    async def worker() -> None:
-        nonlocal stop
+    async def worker():
+        nonlocal checked
         while True:
             try:
-                number = page_queue.get_nowait()
+                product_id = queue.get_nowait()
             except asyncio.QueueEmpty:
-                if stop:
-                    return
-                await asyncio.sleep(0.02)
-                continue
-            status = await fetch_page(number)
-            async with lock:
-                if status == "end":
-                    stop = True
-                elif not stop:
-                    fill(page_queue)
-                if len(pages) % 100 == 0:
-                    print(f"list pages kept={len(pages)} latest={number}", flush=True)
-
-    await asyncio.gather(*(worker() for _ in range(LIST_CONCURRENCY)))
-    end = catalog_end(pages, signature, per_page)
-    print(f"list pages={end or len(pages)} queued_pages={queue.qsize()}", flush=True)
-
-
-async def download_details(
-    session: aiohttp.ClientSession,
-    sem: asyncio.Semaphore,
-    queue: asyncio.Queue,
-    writer: Writer,
-) -> None:
-    lock = asyncio.Lock()
-
-    async def fetch_row(product_id: int) -> dict:
-        detail = await get_json(session, f"{BASE}/detail?id={product_id}", sem)
-        save_detail(detail)
-        return row_from_detail(detail)
-
-    async def worker() -> None:
-        while True:
-            page = await queue.get()
-            if page is None:
                 return
-            number, ids = page
-            missing = list(dict.fromkeys(product_id for product_id in ids if product_id not in writer.saved_ids))
-            rows = await asyncio.gather(
-                *(fetch_row(product_id) for product_id in missing),
-                return_exceptions=True,
-            )
-            errors = [(product_id, row) for product_id, row in zip(missing, rows) if isinstance(row, Exception)]
-            if errors:
-                writer.failed += len(errors)
-                for product_id, exc in errors:
-                    print(f"detail failed page={number} id={product_id} {exc}", flush=True)
-            successful_rows = [row for row in rows if not isinstance(row, Exception)]
-            if successful_rows:
-                async with lock:
-                    writer.commit_page(number, successful_rows)
+            item = records[product_id]["item"]
+            try:
+                await obtain(session, folder, manifest["details"], str(product_id),
+                             f"details/{product_id}.json", detail_url(item), {},
+                             lambda d: validate_detail(d, product_id))
+            except (ValueError, OSError, TypeError):
+                failures.append(product_id)
+            checked += 1
+            if checked % 64 == 0:
+                atomic_json(folder / "manifest.json", manifest)
+            if checked % 256 == 0 or checked == len(records):
+                print(f"Details checked={checked}/{len(records)} failed={len(failures)}", flush=True)
 
-    workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY)]
-    await asyncio.gather(*workers)
+    try:
+        await asyncio.gather(*(worker() for _ in range(concurrency)))
+    finally:
+        atomic_json(folder / "manifest.json", manifest)
+    return failures
 
 
-async def main() -> None:
+def export_and_report(root, folder, manifest):
+    from collections import Counter
+    from app.catalog import normalize_product
+    normalized, originals = [], []
+    field_counts, property_counts, field_types = Counter(), Counter(), {}
+    observed_fields = ("unit", "measure", "quantity", "price", "properties.CML2_BASE_UNIT",
+                       "properties.METRAZHNYY_TOVAR", "properties.DLINA_SHNURA", "properties.DLINA_RULONA",
+                       "properties.DLINA_KABELYA", "properties.DLINA", "properties.KRATNOST_MIN",
+                       "properties.KRATNOST_MAKS", "properties.FILES_CERTIFICATES",
+                       "properties.KOL_VO_U_POSTAVSHCHIKA", "properties.KOL_VO_CHASOV_DOSTAVKI_OT_POSTAVSHCHIKA")
+    source_presence = {key: Counter() for key in observed_fields}
+    for raw, source in archived_records(root, manifest["run_id"]):
+        product = normalize_product(raw)
+        if product is None:
+            raise ValueError(f"Cannot normalize archived product {raw.get('id')}")
+        product.update(source_response=source, source_observed_at=source["observed_at"])
+        normalized.append(product)
+        originals.append(raw)
+        for field in observed_fields:
+            parent, _, key = field.rpartition(".")
+            container = (raw.get(parent) or {}) if parent else raw
+            state = "absent" if key not in container else "null" if container[key] is None else "empty" if container[key] in ("", [], {}) else "present"
+            source_presence[field][state] += 1
+        field_counts.update(raw.keys())
+        property_counts.update((raw.get("properties") or {}).keys())
+        for key, value in raw.items():
+            field_types.setdefault(key, Counter())[type(value).__name__] += 1
+    normalized.sort(key=lambda p: p["id"])
+    atomic_json(folder / "products.json", normalized)
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=COLUMNS, delimiter=";")
+    writer.writeheader()
+    for raw in originals:
+        # CSV is a projection only. JSON cells retain nested data rather than flatten it.
+        writer.writerow({key: json.dumps(raw[key], ensure_ascii=False) if isinstance(raw.get(key), (dict, list))
+                         else raw.get(key) for key in COLUMNS})
+    atomic_bytes(folder / "products.csv", stream.getvalue().encode("utf-8-sig"))
+    coverage = {"selling_unit": sum(p["unit_known"] for p in normalized),
+                "explicit_lengths": sum(bool(p["lengths"]) for p in normalized),
+                "normalized_lengths": sum(any(v["metres"] is not None for v in p["lengths"]) for p in normalized),
+                "embedded_specifications": sum(bool(p["embedded_specifications"]) for p in normalized),
+                "price": sum(p["price"] is not None for p in normalized),
+                "stock": sum(p["quantity"] is not None for p in normalized),
+                "purchase_increment": sum(p["quantity_step"] is not None for p in normalized),
+                "minimum_quantity": sum(p["min_quantity"] is not None for p in normalized),
+                "certificate_links": sum(bool(p["certificates"]) for p in normalized),
+                "certificate_references": sum(bool(p["certificate_references"]) for p in normalized),
+                "supplier_availability": sum(bool(p["supplier_availability"]) for p in normalized)}
+    report = {"run_id": manifest["run_id"], "verified_at": utc_now(), "status": "complete",
+              "listing_pages": manifest["last_page"], "discovered_products": len(normalized),
+              "valid_details": len(normalized), "missing_details": [], "failed_details": [],
+              "raw_checksums_verified": True, "raw_top_level_field_counts": field_counts,
+              "raw_top_level_value_types": field_types, "raw_property_counts": property_counts,
+              "source_field_presence": source_presence,
+              "derived_field_coverage": coverage,
+              "missing_derived_fields": {key: len(normalized) - count for key, count in coverage.items()},
+              "note": "Raw responses preserve all returned fields. Missing derived values may be absent, ambiguous, or unrecognized in the source; see field provenance and original response."}
+    previous = root / "current.json"
+    if previous.exists():
+        old_folder = run_path(root, json.loads(previous.read_text())["run_id"])
+        old_manifest = json.loads((old_folder / "manifest.json").read_text())
+        old = set(listing_records(old_folder, old_manifest))
+    elif (root / "products.csv").exists():
+        with (root / "products.csv").open(encoding="utf-8-sig", newline="") as handle:
+            old = {int(row["id"]) for row in csv.DictReader(handle, delimiter=";")}
+    else:
+        old = set()
+    report["previous_ids_not_listed"] = sorted(old - {p["id"] for p in normalized})
+    atomic_json(folder / "report.json", report)
+    return report
+
+
+async def download_catalog(session, root=OUT, *, new=False, concurrency=CONCURRENCY):
+    if concurrency < 1:
+        raise ValueError("Concurrency must be positive")
+    folder, manifest = open_run(root, new)
+    if manifest["status"] == "complete":
+        # Verify before reporting an immutable run as usable. --new refreshes the source.
+        list(archived_records(root, manifest["run_id"]))
+        if not (folder / "report.json").exists() or not (folder / "products.json").exists() or not (folder / "products.csv").exists():
+            export_and_report(root, folder, manifest)
+        active = root / "current.json"
+        if not active.exists() or json.loads(active.read_text()).get("run_id") != manifest["run_id"]:
+            atomic_json(active, {"run_id": manifest["run_id"]})
+        print(f"Already complete: {folder}. Use --new for a fresh snapshot.", flush=True)
+        return folder
+    records = await collect_archive(session, folder, manifest)
+    failures = await download_archive_details(session, folder, manifest, records, concurrency)
+    if failures:
+        atomic_json(folder / "report.json", {"run_id": manifest["run_id"], "status": "incomplete",
+                    "discovered_products": len(records), "failed_details": failures,
+                    "missing_details": [pid for pid in records if manifest["details"].get(str(pid), {}).get("status") != "complete"]})
+        raise ValueError(f"{len(failures)} details failed; rerun to resume. Active catalog preserved.")
+    manifest.update(status="complete", completed_at=utc_now())
+    atomic_json(folder / "manifest.json", manifest)
+    try:
+        report = export_and_report(root, folder, manifest)
+    except Exception:
+        manifest["status"] = "downloading"
+        atomic_json(folder / "manifest.json", manifest)
+        raise
+    atomic_json(root / "current.json", {"run_id": manifest["run_id"]})
+    print(f"Published raw snapshot: {report['valid_details']} products; report={folder / 'report.json'}", flush=True)
+    return folder
+
+
+async def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--new", action="store_true", help="Start a fresh snapshot; otherwise resume the current download")
+    parser.add_argument("--concurrency", type=int, default=CONCURRENCY)
+    args = parser.parse_args()
     load_dotenv(ROOT / ".env")
-    user = os.environ.get("EKT_API_USER")
-    password = os.environ.get("EKT_API_PASSWORD")
+    user, password = os.environ.get("EKT_API_USER"), os.environ.get("EKT_API_PASSWORD")
     if not user or not password:
         raise SystemExit("Set EKT_API_USER and EKT_API_PASSWORD in .env")
-
     OUT.mkdir(parents=True, exist_ok=True)
-    with LIST_PATH.open("a", encoding="utf-8") as list_handle:
+    with (OUT / ".download.lock").open("a") as lock:
         try:
-            fcntl.flock(list_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise SystemExit("Another download_ekt.py process is already running")
-
-        ensure_spreadsheet_csv()
-        saved_ids = load_saved_ids()
-        pages = load_list_pages()
-        print(f"resume saved={len(saved_ids)} list_pages={len(pages)} concurrency={CONCURRENCY}", flush=True)
-
-        started = time.perf_counter()
-        sem = asyncio.Semaphore(CONCURRENCY)
-        queue: asyncio.Queue = asyncio.Queue()
-        scheduled: set[int] = set()
-        connector = aiohttp.TCPConnector(limit=CONCURRENCY, limit_per_host=CONCURRENCY, ttl_dns_cache=300)
-        writer = Writer(saved_ids)
-        try:
-            async with aiohttp.ClientSession(
-                connector=connector,
-                timeout=REQUEST_TIMEOUT,
-                headers={
-                    "Accept": "application/json",
-                    "Authorization": aiohttp.encode_basic_auth(user, password),
-                },
-            ) as session:
-                await collect_pages(session, sem, pages, list_handle, queue, scheduled, saved_ids)
-                for _ in range(CONCURRENCY):
-                    queue.put_nowait(None)
-                await download_details(session, sem, queue, writer)
-        finally:
-            writer.close()
-
-        elapsed = time.perf_counter() - started
-        print(
-            f"csv={CSV_PATH} saved={writer.saved} failed={writer.failed} seconds={elapsed:.1f}",
-            flush=True,
-        )
-        if writer.failed:
-            raise SystemExit(f"{writer.failed} details failed; re-run to retry them")
+            raise SystemExit("Another raw catalog download is running")
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=args.concurrency),
+                                         headers={"Accept": "application/json",
+                                                  "Authorization": aiohttp.encode_basic_auth(user, password)}) as session:
+            await download_catalog(session, new=args.new, concurrency=args.concurrency)
 
 
 if __name__ == "__main__":

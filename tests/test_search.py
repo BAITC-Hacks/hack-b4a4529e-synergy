@@ -61,6 +61,23 @@ def test_load_pages_and_details(tmp_path):
     assert "Legrand" in products[0]["spec_snippet"] or products[0]["description"]
 
 
+def test_detail_precedence_and_observation_timestamp(tmp_path):
+    (tmp_path / "products.json").write_text(json.dumps([
+        {"id": 101, "name": "Автомат", "article": "a1", "price": "1.25", "quantity": 2}
+    ]), encoding="utf-8")
+    (tmp_path / "products.csv").write_text(
+        "id;name;article;price;quantity\n101;Автомат;a1;1.30;3\n", encoding="utf-8")
+    details = tmp_path / "details"
+    details.mkdir()
+    (details / "101.json").write_text(json.dumps({
+        "id": 101, "name": "Автомат", "price": "1.35", "quantity": 4,
+        "_source_observed_at": "2026-09-23T10:00:00+00:00",
+    }), encoding="utf-8")
+    product = load_products(tmp_path)[0]
+    assert product["price"] == "1.35" and product["quantity"] == 4
+    assert product["source_observed_at"] == "2026-09-23T10:00:00+00:00"
+
+
 def test_load_semicolon_csv(tmp_path):
     (tmp_path / "products.csv").write_text(
         "id;article;name;price;quantity;description;image;url;stores;properties;offers\n"
@@ -143,8 +160,48 @@ def test_missing_requested_spec_is_marked_unverified():
     index = CatalogIndex(products, np.array([[1, 0], [.8, .6]], dtype=np.float32))
     result = search_products("Автомат 16 А", index=index,
                              embed_query=lambda _q: np.array([1, 0], dtype=np.float32))
-    assert result["results"][0]["id"] == 2
-    assert result["results"][1]["unverified_specs"] == ["ток"]
+    assert [item["id"] for item in result["results"]] == [2]
+    products.pop()
+    index = CatalogIndex(products, np.array([[1, 0]], dtype=np.float32))
+    uncertain = search_products("Автомат 16 А", index=index,
+                                embed_query=lambda _q: np.array([1, 0], dtype=np.float32))
+    assert uncertain["results"][0]["unverified_specs"] == ["ток"]
+    assert uncertain["needs_clarification"]
+
+
+def test_cable_query_rejects_other_series_and_material():
+    products = [
+        {"id": 1, "name": "АВВГ 3х2,5", "article": "al", "price": 10, "quantity": 3,
+         "category": "kabel_provod"},
+        {"id": 2, "name": "ВВГ 3х2,5", "article": "cu", "price": 12, "quantity": 3,
+         "category": "kabel_provod"},
+        {"id": 3, "name": "КГ 3х2,5", "article": "kg", "price": 9, "quantity": 3,
+         "category": "kabel_provod"},
+    ]
+    index = CatalogIndex(products, np.array([[1, 0], [.8, .6], [.9, .1]], dtype=np.float32))
+    result = search_products("Кабель ВВГ 3х2.5", index=index,
+                             embed_query=lambda _q: np.array([1, 0], dtype=np.float32))
+    assert [item["id"] for item in result["results"]] == [2]
+
+
+def test_lamp_wattage_and_breaker_type_are_not_inferred_from_similarity():
+    lamps = [
+        {"id": 1, "name": "Лампа E27 7W", "article": "l7", "price": 10, "quantity": 3},
+        {"id": 2, "name": "Лампа E27 10W", "article": "l10", "price": 12, "quantity": 3},
+    ]
+    index = CatalogIndex(lamps, np.array([[1, 0], [.8, .6]], dtype=np.float32))
+    result = search_products("лампа E27 10 Вт", index=index,
+                             embed_query=lambda _q: np.array([1, 0], dtype=np.float32))
+    assert [item["id"] for item in result["results"]] == [2]
+
+    breakers = [
+        {"id": 1, "name": "УЗО АВДТ 16А", "article": "rcbo", "price": 10, "quantity": 3},
+        {"id": 2, "name": "Автоматический выключатель 16А", "article": "mcb", "price": 12, "quantity": 3},
+    ]
+    index = CatalogIndex(breakers, np.array([[1, 0], [.8, .6]], dtype=np.float32))
+    result = search_products("автоматический выключатель 16 А", index=index,
+                             embed_query=lambda _q: np.array([1, 0], dtype=np.float32))
+    assert [item["id"] for item in result["results"]] == [2]
 
 
 def test_exact_out_of_stock_article_returns_analog_with_reason():

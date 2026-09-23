@@ -13,19 +13,25 @@ function renderCart(cart) {
   empty.hidden = Boolean(cart.items.length);
   sheet.hidden = !cart.items.length;
   grand.hidden = !cart.items.length;
+  document.getElementById("cart-content").hidden = !cart.items.length;
+  document.getElementById("cart-caption").textContent = cart.items.length
+    ? "Выбранные товары · " + cart.items.length.toLocaleString("ru-RU")
+    : "Всё нужное для вашей задачи — в одном месте.";
   rows.replaceChildren();
   for (const item of cart.items) {
     const tr = document.createElement("tr");
     const name = document.createElement("td");
-    name.textContent = item.name;
-    const article = document.createElement("td");
-    article.className = "mono";
-    article.dataset.label = "Артикул";
-    article.textContent = item.article || item.product_id;
+    const title = document.createElement("p");
+    title.className = "cart-product-name";
+    title.textContent = item.name;
+    const article = document.createElement("p");
+    article.className = "article";
+    article.textContent = "Артикул " + (item.article || item.product_id);
+    name.append(title, article);
     const qty = document.createElement("td");
     qty.className = "mono";
     qty.dataset.label = "Количество";
-    qty.textContent = `${item.quantity} ${item.unit || "ед."}`;
+    qty.textContent = `${Number(item.quantity).toLocaleString("ru-RU", { maximumFractionDigits: 6 })} ${item.unit || "ед."}`;
     const price = document.createElement("td");
     price.className = "mono";
     price.dataset.label = "Цена";
@@ -38,14 +44,14 @@ function renderCart(cart) {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "remove-line";
-    remove.textContent = "Убрать";
+    remove.textContent = "Удалить";
     remove.setAttribute("aria-label", "Убрать из корзины: " + item.name);
     remove.addEventListener("click", () => removeLine(item.line_id));
     action.append(remove);
-    tr.append(name, article, qty, price, sum, action);
+    tr.append(name, qty, price, sum, action);
     rows.appendChild(tr);
   }
-  grand.textContent = `Итого ${cart.total_label || money(cart.total)}`;
+  grand.textContent = cart.total_label || money(cart.total);
 }
 
 function showStatus(message) {
@@ -67,6 +73,7 @@ async function removeLine(lineId) {
     if (!res.ok) { showStatus(data.error || "Не удалось убрать товар. Повторите действие."); return; }
     renderCart(data.cart);
     showStatus("Товар убран из корзины.");
+    (document.querySelector(".remove-line") || document.querySelector("#empty-cart .cart-return")).focus();
   } catch { showStatus("Нет связи. Товар остался в корзине. Повторите действие."); }
   finally { document.querySelectorAll(".remove-line").forEach(button => { button.disabled = false; }); }
 }
@@ -81,5 +88,6 @@ async function boot() {
 
 boot().catch(() => {
   document.getElementById("empty-cart").hidden = true;
+  document.getElementById("cart-caption").textContent = "Не удалось загрузить товары.";
   showStatus("Не удалось загрузить корзину. Обновите страницу.");
 });
